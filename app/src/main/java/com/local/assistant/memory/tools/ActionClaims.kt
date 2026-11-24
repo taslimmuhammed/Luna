@@ -88,8 +88,9 @@ object ActionClaims {
     /** Says a message went or a call was made: only true once the user has pressed the button. */
     private val SENT = listOf(
         "$I_DID(?:sent|shared|e-?mailed|texted|messaged|whatsapped|forwarded|dial(?:l)?ed|called|rang|rung)\\b",
-        "\\b(?:has|have)\\s+been\\s+(?:successfully\\s+)?(?:sent|shared|e-?mailed|texted|forwarded|delivered|made|placed)\\b",
-        "(?:^|[.!?]\\s+)(?:your\\s+)?(?:email|e-mail|mail|message|text|sms|whatsapp|screenshot|call)\\s+(?:was\\s+|is\\s+|has\\s+been\\s+)?(?:successfully\\s+)?(?:sent|shared|made|placed)\\b",
+        // "The phone call to Rahul has been initiated." (Nano, 24 Nov 2026)
+        "\\b(?:has|have)\\s+been\\s+(?:successfully\\s+)?(?:sent|shared|e-?mailed|texted|forwarded|delivered|made|placed|initiated)\\b",
+        "(?:^|[.!?]\\s+)(?:your\\s+)?(?:email|e-mail|mail|message|text|sms|whatsapp|screenshot|call)\\s+(?:was\\s+|is\\s+|has\\s+been\\s+)?(?:successfully\\s+)?(?:sent|shared|made|placed|initiated)\\b",
         "^\\s*sent\\b",
     ).map { Regex(it, RegexOption.IGNORE_CASE) }
 

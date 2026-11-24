@@ -44,17 +44,38 @@ class ModelProbeReceiver : BroadcastReceiver() {
         val cases = intent.getStringExtra("cases")?.split(',')?.map { it.trim() }?.toSet()
         container.appScope.launch {
             val out = StringBuilder()
+            // Written as it goes, so a run that hangs or is stopped still leaves what it found.
+            val file = File(context.filesDir, "model-probe.md").also { it.writeText("") }
             fun log(line: String) {
                 Log.i(TAG, line)
                 out.append(line).append('\n')
+                file.appendText(line + "\n")
             }
             try {
-                ModelProbe(context, container.llmBackend, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
+                when (intent.getStringExtra("mode")) {
+                    "tools" -> ToolBench(
+                        container.llmBackend,
+                        container.settings.systemPrompt,
+                        ::log,
+                        Sampling.CHAT.let { chat ->
+                            chat.copy(
+                                temperature = temperature ?: chat.temperature,
+                                topK = intent.getStringExtra("topk")?.toIntOrNull() ?: chat.topK,
+                            )
+                        },
+                    ).run(
+                        variants = intent.getStringExtra("variants")?.split(',')?.map { ToolBench.tuning(it.trim()) } ?: ToolBench.VARIANTS,
+                        cases = cases,
+                        gemma = intent.getBooleanExtra("gemma", false),
+                    )
+                    "voice" -> VoiceBench(context, container.llmBackend, ::log).run(download = intent.getBooleanExtra("download", false))
+                    else -> ModelProbe(context, container.llmBackend, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
+                }
             } catch (e: Throwable) {
                 log("PROBE FAILED: ${e.javaClass.simpleName}: ${e.message}")
                 Log.e(TAG, "Probe failed", e)
             } finally {
-                File(context.filesDir, "model-probe.md").writeText(out.toString())
+                file.appendText("PROBE DONE\n")
                 Log.i(TAG, "PROBE DONE")
             }
         }

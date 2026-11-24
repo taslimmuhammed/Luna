@@ -343,7 +343,10 @@ class AssistViewModel(
     fun undo(recordId: Long) {
         viewModelScope.launch {
             when (tools.undo(recordId)) {
-                ToolExecutor.UndoResult.UNDONE -> conversations.prefixMayHaveChanged()
+                ToolExecutor.UndoResult.UNDONE -> {
+                    conversations.toolCallUndone()
+                    conversations.prefixMayHaveChanged()
+                }
                 ToolExecutor.UndoResult.CHANGED_SINCE -> _notice.value = "That has changed since, so it was left as it is."
                 else -> Unit
             }

@@ -314,6 +314,7 @@ dependencies {
     // Which cloud model, and the limits on what goes to it, changeable without a release.
     implementation(libs.firebase.config)
     implementation(libs.mlkit.genai.prompt)
+    implementation(libs.mlkit.genai.speech)
     // Firebase AI Logic's function calls carry their arguments as kotlinx JSON.
     implementation(libs.kotlinx.serialization.json)
 

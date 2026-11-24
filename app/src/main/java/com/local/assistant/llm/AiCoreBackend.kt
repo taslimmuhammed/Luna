@@ -38,6 +38,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -57,7 +59,15 @@ import java.io.File
 class AiCoreBackend(
     private val preview: () -> Boolean = { true },
     private val fast: () -> Boolean = { false },
+    /** How Nano is prompted for the app's tools ([NanoPrompt]). */
+    private val tuning: () -> NanoPrompt.Tuning = { NanoPrompt.Tuning.BEST },
 ) : LlmBackend {
+
+    /**
+     * Writes a voice message down again from its recording (path, the phone's words), when
+     * something can; null keeps the phone's words. Nano itself takes no audio.
+     */
+    @Volatile var ears: (suspend (String, String) -> String?)? = null
 
     /** What the phone's AICore offers, once [ensureReady] has asked. */
     data class Report(
@@ -139,12 +149,23 @@ class AiCoreBackend(
     override suspend fun openChat(spec: ChatSpec): ChatSession {
         val found = inspect()
         if (!found.available) error("Gemini Nano isn't available on this phone (${statusName(found.status)})")
-        val tools = if (found.has(Feature.FUNCTION_CALLING)) spec.toolDeclarations.mapNotNull(::declaration) else emptyList()
+        val tuned = tuning()
+        val declared = if (found.has(Feature.FUNCTION_CALLING)) spec.toolDeclarations else emptyList()
+        val tools = declared
+            .map { if (tuned.paramDocs) NanoPrompt.withParamDocs(it) else it }
+            .mapNotNull(::declaration)
+        val system = if (tuned.examples && tools.isNotEmpty()) {
+            NanoPrompt.reworded(spec.systemPrefix) + "\n\n" + NanoPrompt.guide(tools.map { it.name }.toSet())
+        } else {
+            spec.systemPrefix
+        }
         return AiCoreChatSession(
             backend = this,
-            system = spec.systemPrefix,
+            system = system,
             systemSupported = found.has(Feature.SYSTEM_PROMPT),
             tools = tools,
+            focus = tuned.focus,
+            thinking = tuned.thinking && found.has(Feature.THINKING_MODE),
             turns = historyContents(spec.history).toMutableList(),
             maxOutputTokens = spec.maxOutputTokens,
             sampling = spec.sampling,
@@ -175,6 +196,7 @@ class AiCoreBackend(
         tools: List<FunctionDeclaration>,
         maxOutputTokens: Int,
         sampling: Sampling,
+        thinking: Boolean = false,
     ): GenerateContentRequest {
         // Without a system prompt on this phone, the instructions open the first user turn.
         val sent = if (systemSupported || system.isBlank() || contents.isEmpty()) contents else {
@@ -187,10 +209,13 @@ class AiCoreBackend(
         return GenerateContentRequest.Builder(sent).apply {
             if (systemSupported && system.isNotBlank()) systemInstruction = SystemInstruction(system)
             if (tools.isNotEmpty()) setTools(tools)
+            enableThinking = thinking
             this.maxOutputTokens = maxOutputTokens.coerceIn(1, MAX_OUTPUT_TOKENS)
-            // Gemma's 1.0 left stray words after tool results on Nano 4; 0.3 didn't (probe, 24 Nov 2026).
+            // Gemma's 1.0 left stray words after tool results on Nano 4. 0.3 still put a stray
+            // Hebrew word in a reply and "オン" for "on" in a call; 0.1 and top-K 8 didn't, and
+            // called as many tools right (ToolBench, 24 Nov 2026).
             temperature = minOf(sampling.temperature, MAX_TEMPERATURE).toFloat()
-            topK = sampling.topK
+            topK = minOf(sampling.topK, MAX_TOP_K)
             seed = sampling.seed
         }.build()
     }
@@ -239,6 +264,9 @@ class AiCoreBackend(
         return out
     }
 
+    /** AICore took longer than [REQUEST_TIMEOUT_MS] to answer one request. */
+    class NanoTimeout : Exception("Gemini Nano didn't answer in ${REQUEST_TIMEOUT_MS / 1000} s")
+
     companion object {
         private const val TAG = "AiCoreBackend"
         const val DEFAULT_TOKEN_LIMIT = 4_000
@@ -246,7 +274,11 @@ class AiCoreBackend(
         /** What AICore allows in one reply. */
         const val MAX_OUTPUT_TOKENS = 1_024
         const val IMAGE_TOKENS = 256
-        const val MAX_TEMPERATURE = 0.3
+        const val MAX_TEMPERATURE = 0.1
+        const val MAX_TOP_K = 8
+
+        /** The longest one request may take; a reply of 512 tokens took ~10 s on a cool phone. */
+        const val REQUEST_TIMEOUT_MS = 45_000L
 
         private val gson = Gson()
 
@@ -353,6 +385,9 @@ private class AiCoreChatSession(
     private val system: String,
     private val systemSupported: Boolean,
     private val tools: List<FunctionDeclaration>,
+    /** Each request offers only the tools its message could be asking for ([NanoPrompt.focus]). */
+    private val focus: Boolean,
+    private val thinking: Boolean,
     private val turns: MutableList<Content>,
     private val maxOutputTokens: Int,
     private val sampling: Sampling,
@@ -370,6 +405,18 @@ private class AiCoreChatSession(
     override fun send(envelope: String, attachment: PromptAttachment?): Flow<GenEvent> = send(envelope, listOfNotNull(attachment))
 
     override fun send(envelope: String, attachments: List<PromptAttachment>): Flow<GenEvent> {
+        // A voice message: Nano can't hear it, so the words may be put right first (ears).
+        val recording = attachments.firstOrNull { it.kind == AttachmentKind.AUDIO && File(it.path).isFile }
+        val words = NanoPrompt.heardWords(envelope)
+        val ears = backend.ears
+        if (recording == null || words == null || ears == null) return sendAsNano(NanoPrompt.forNano(envelope), attachments)
+        return flow {
+            val heard = runCatching { ears(recording.path, words) }.onFailure { Log.w(TAG, "Couldn't hear the voice message again", it) }.getOrNull()
+            emitAll(sendAsNano(NanoPrompt.forNano(envelope, heard), attachments))
+        }
+    }
+
+    private fun sendAsNano(envelope: String, attachments: List<PromptAttachment>): Flow<GenEvent> {
         val content = Content.Builder().role(Content.Role.USER).apply {
             // One image per request is all Nano takes.
             attachments.firstOrNull { it.kind == AttachmentKind.IMAGE && File(it.path).isFile }?.let { image ->
@@ -377,7 +424,17 @@ private class AiCoreChatSession(
             }
             addPart(TextPart(envelope))
         }.build()
+        if (focus) offered = focused(envelope)
         return generate(content)
+    }
+
+    /** The tools for a turn whose message is [envelope]; kept for its tool rounds. */
+    private var offered: List<FunctionDeclaration>? = null
+
+    private fun focused(envelope: String): List<FunctionDeclaration> {
+        val called = turns.flatMap { turn -> turn.parts.filterIsInstance<FunctionCallPart>().map { it.functionCall.name } }.toSet()
+        val names = NanoPrompt.focus(tools.map { it.name }, envelope, called)
+        return tools.filter { it.name in names }.also { Log.i(TAG, "Offered ${it.size} of ${tools.size} tools: ${it.map { d -> d.name }}") }
     }
 
     override fun sendToolResults(results: List<ToolResult>): Flow<GenEvent> {
@@ -392,55 +449,80 @@ private class AiCoreChatSession(
 
     private fun generate(content: Content): Flow<GenEvent> = channelFlow {
         turns += content
-        val request = backend.request(system, systemSupported, turns.toList(), tools, maxOutputTokens, sampling)
+        val base = turns.size
         val started = SystemClock.elapsedRealtime()
         var firstAt = 0L
         var chars = 0
         var failure: Throwable? = null
         var calls: List<FunctionCall> = emptyList()
-        var text = ""
-        // Everything streamed so far, and how much of its visible part the chat has been sent.
-        val streamed = StringBuilder()
-        var shown = 0
+        // All the reply's visible text the chat has been sent, over every request.
+        val reply = StringBuilder()
+        var continued = 0
         val running = launch {
             try {
-                val response = backend.client().generateContent(request, object : StreamingCallback {
-                    override fun onNewText(text: String) {
-                        if (text.isEmpty()) return
-                        streamed.append(text)
-                        // A tool call streams as text too (<ctrl42>call:…<ctrl43>): never shown.
-                        val visible = AiCoreBackend.visibleText(streamed.toString())
-                        if (visible.length <= shown) return
+                while (true) {
+                    val request = backend.request(system, systemSupported, turns.toList(), offered ?: tools, maxOutputTokens, sampling, thinking)
+                    // Everything streamed by this request, and how much of its visible part was sent.
+                    val streamed = StringBuilder()
+                    var shown = 0
+                    fun show(delta: String) {
+                        if (delta.isEmpty()) return
                         if (firstAt == 0L) firstAt = SystemClock.elapsedRealtime()
-                        chars += visible.length - shown
-                        trySend(GenEvent.TextDelta(visible.substring(shown)))
-                        shown = visible.length
+                        chars += delta.length
+                        reply.append(delta)
+                        trySend(GenEvent.TextDelta(delta))
                     }
-                })
-                val candidate: Candidate? = response.candidates.firstOrNull()
-                text = AiCoreBackend.visibleText(candidate?.text.orEmpty(), final = true).trim()
-                calls = candidate?.functionCalls.orEmpty()
-                if (candidate?.finishReason == Candidate.FinishReason.MAX_TOKENS) Log.i(TAG, "Reply cut at the output limit")
+                    // AICore can stop answering altogether (seen after a COMPUTE_ERROR on a hot phone,
+                    // 24 Nov 2026): a request waits this long at most, then fails as NanoTimeout.
+                    val response = kotlinx.coroutines.withTimeoutOrNull(AiCoreBackend.REQUEST_TIMEOUT_MS) {
+                        backend.client().generateContent(request, object : StreamingCallback {
+                            override fun onNewText(text: String) {
+                                if (text.isEmpty()) return
+                                streamed.append(text)
+                                // A tool call streams as text too (<ctrl42>call:…<ctrl43>): never shown.
+                                val visible = AiCoreBackend.visibleText(streamed.toString())
+                                if (visible.length <= shown) return
+                                show(visible.substring(shown))
+                                shown = visible.length
+                            }
+                        })
+                    } ?: throw AiCoreBackend.NanoTimeout()
+                    val candidate: Candidate? = response.candidates.firstOrNull()
+                    val text = AiCoreBackend.visibleText(candidate?.text.orEmpty(), final = true)
+                    // Replies that arrive whole (no streamed text) still reach the chat.
+                    if (shown == 0) show(if (continued == 0) text.trimStart() else text)
+                    calls = candidate?.functionCalls.orEmpty()
+                    val cut = candidate?.finishReason == Candidate.FinishReason.MAX_TOKENS
+                    // AICore writes at most MAX_OUTPUT_TOKENS a request: a longer reply the chat
+                    // allows (code, a long list) is asked for in parts. Cut off, Nano 4 answered
+                    // "continue" with "How can I help you today?" (24 Nov 2026, the user's chat).
+                    if (!cut || calls.isNotEmpty() || continued >= MAX_CONTINUATIONS || (reply.length + 3) / 4 >= maxOutputTokens) {
+                        if (cut) Log.i(TAG, "Reply cut at the output limit")
+                        break
+                    }
+                    continued++
+                    Log.i(TAG, "Reply cut at the output limit; asking for the rest ($continued)")
+                    turns += Content.Builder().role(Content.Role.MODEL).text(text).build()
+                    turns += Content.Builder().role(Content.Role.USER).text(CONTINUE).build()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                failure = e
+                // Failing while asked for the rest, what was written stands.
+                if (continued == 0) failure = e else Log.w(TAG, "Couldn't get the rest of a long reply", e)
             }
         }
         job = running
         running.join()
         val done = SystemClock.elapsedRealtime()
+        // The requests for the rest are not kept: the reply stands as one turn.
+        while (turns.size > base) turns.removeAt(turns.lastIndex)
         if (failure != null) {
             turns.removeAt(turns.lastIndex)
             send(GenEvent.Error(failure!!))
             return@channelFlow
         }
-        // Replies that arrive whole (no streamed text) still reach the chat.
-        if (chars == 0 && text.isNotEmpty()) {
-            firstAt = done
-            chars = text.length
-            send(GenEvent.TextDelta(text))
-        }
+        val text = reply.toString().trim()
         turns += Content.Builder().role(Content.Role.MODEL).apply {
             if (text.isNotEmpty()) addPart(TextPart(text))
             calls.forEach { addPart(FunctionCallPart(it)) }
@@ -479,5 +561,12 @@ private class AiCoreChatSession(
 
         /** About what a tool call costs in output, for the stats. */
         const val CALL_TOKENS = 20
+
+        /** How many more requests a long reply may take, after the first. */
+        const val MAX_CONTINUATIONS = 3
+
+        /** Asks for the rest of a reply cut at the output limit; never kept in the conversation. */
+        const val CONTINUE = "[Your reply was cut off by the length limit. Continue it exactly where it stopped, " +
+            "even mid-word or mid-line, without repeating anything or saying you're continuing.]"
     }
 }

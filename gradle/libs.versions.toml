@@ -35,6 +35,8 @@ firebaseAppCheck = "20.1.0"
 firebaseConfig = "24.0.1"
 # Gemini Nano through AICore directly (ML Kit Prompt API), the version Firebase's on-device part uses.
 mlkitGenaiPrompt = "1.0.0-beta5"
+# AICore's speech recognition, for Nano chats' voice messages (Nano can't hear).
+mlkitGenaiSpeech = "1.0.0-alpha2"
 googleServices = "4.4.4"
 junit = "4.13.2"
 androidxTestRunner = "1.7.0"
@@ -80,6 +82,7 @@ firebase-appcheck-debug = { group = "com.google.firebase", name = "firebase-appc
 firebase-appcheck-playintegrity = { group = "com.google.firebase", name = "firebase-appcheck-playintegrity", version.ref = "firebaseAppCheck" }
 firebase-config = { group = "com.google.firebase", name = "firebase-config", version.ref = "firebaseConfig" }
 mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", version.ref = "mlkitGenaiPrompt" }
+mlkit-genai-speech = { group = "com.google.mlkit", name = "genai-speech-recognition", version.ref = "mlkitGenaiSpeech" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }

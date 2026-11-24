@@ -510,6 +510,16 @@ class ConversationManager(
      */
     fun prefixMayHaveChanged() = scheduleMaintenance()
 
+    /**
+     * A tool call in the chat was undone: the live conversation still has it as done, so it goes,
+     * and the next turn is rebuilt from what is stored, where the call says it was undone
+     * ([com.local.assistant.llm.ToolReplay.result]). Waiting for a quiet spell was too late when
+     * the user asked again at once.
+     */
+    suspend fun toolCallUndone() = mutex.withLock {
+        live?.let { close(it, "undone") }
+    }
+
     /** The user switched chats: the meter and notice should stop describing the old one. */
     fun onChatSelected(chatId: Long?) {
         if (live?.chatId != chatId) {

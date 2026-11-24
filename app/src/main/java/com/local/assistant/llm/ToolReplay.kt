@@ -18,13 +18,23 @@ object ToolReplay {
     fun call(json: String): Pair<String, Map<String, Any?>>? =
         ChatToolLog.parse(json)?.takeIf { it.tool.isNotBlank() }?.let { it.tool to it.arguments }
 
-    /** What the call returned, shortened; an unreadable result as an error. */
+    /**
+     * What the call returned, shortened; an unreadable result as an error. A call the user undid
+     * (the chip's undo) says so: replayed as it ran, the model took the reminder as set, and when
+     * the user asked for it again said "Task added." with no call (Nano, 24 Nov 2026).
+     */
     fun result(json: String): Map<String, Any?> {
-        val raw = ChatToolLog.parse(json)?.result ?: return mapOf("ok" to false)
+        val record = ChatToolLog.parse(json)
+        val raw = record?.result ?: return mapOf("ok" to false)
         @Suppress("UNCHECKED_CAST")
-        val map = runCatching { gson.fromJson(raw, Map::class.java) as Map<String, Any?> }.getOrNull() ?: return mapOf("result" to shorten(raw))
-        return map.mapValues { (_, value) -> shorten(value) }
+        val map = runCatching { gson.fromJson(raw, Map::class.java) as Map<String, Any?> }.getOrNull()
+            ?.mapValues { (_, value) -> shorten(value) }
+            ?: mapOf("result" to shorten(raw))
+        return if (record.undone) map + ("undone" to UNDONE) else map
     }
+
+    /** Added to the result of a call the user undid. */
+    const val UNDONE = "The user undid this afterwards, so it no longer stands. Asked again, call the tool again."
 
     private fun shorten(value: Any?): Any? = when (value) {
         is String -> if (value.length > MAX_TEXT) value.take(MAX_TEXT) + "…" else value

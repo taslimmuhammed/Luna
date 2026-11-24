@@ -417,7 +417,9 @@ class ToolExecutor(
         // "Reminder before 5 kilometer" says only where: it is named for it, not for the distance
         // again, which the chip and the agenda show beside it. With no distance either, it is
         // only a reminder, or an alarm.
-        val words = tidyTitle(DistanceWords.remove(title))
+        // "remind me when we reach near Whitefield" came whole as the title (Nano, 24 Nov 2026):
+        // arriving is what the place says, so it goes from the name.
+        val words = tidyTitle(DistanceWords.remove(title.replace(ARRIVING, "")))
         val label = if (alarm) ALARM else REMINDER
         val name = when {
             words.lowercase(Locale.ROOT) !in BARE_TITLES -> words
@@ -1244,7 +1246,7 @@ class ToolExecutor(
         subject.replace('_', ' ').replaceFirstChar { it.titlecase(Locale.ROOT) }
 
     private fun tidyTitle(raw: String): String =
-        raw.trim().removePrefix("remind me to ").removePrefix("to ").trim().trimEnd('.')
+        raw.trim().replace(ASKING, "").trim().trimEnd('.')
             .replaceFirstChar { it.titlecase(Locale.ROOT) }
 
     private fun significantWords(text: String): List<String> =
@@ -1298,6 +1300,15 @@ class ToolExecutor(
             "The user is already there (within that distance), so it rings the next time they arrive, not now. Tell them."
 
         /** A reminder's title that says nothing but that it is one: "Reminder", once the distance is gone. */
+        /** "Remind me to", "to": the asking, not what to do. */
+        private val ASKING = Regex("^(?:remind me to\\s+)?(?:to\\s+)?", RegexOption.IGNORE_CASE)
+
+        /** "when we reach near Whitefield", "once I get to the office": where a place reminder rings, said in its title. */
+        private val ARRIVING = Regex(
+            "\\s*\\b(?:when|once|as soon as|whenever|after)\\s+(?:i|we)(?:['’]m|\\s+am|\\s+are)?\\s+(?:reach|get|arrive|come|go)\\w*\\b.*$",
+            RegexOption.IGNORE_CASE,
+        )
+
         private val BARE_TITLES = setOf("", "reminder", "a reminder", "remind me", "set a reminder", "set reminder", "alert", "an alert", "notify me")
 
         /** What a reminder or alarm the user gave no name is called. */

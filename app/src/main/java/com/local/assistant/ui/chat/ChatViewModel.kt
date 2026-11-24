@@ -78,6 +78,8 @@ class ChatViewModel(
     private val onPhoneKillsAnswered: () -> Unit = {},
     /** Cloud mode is in this build and on ([com.local.assistant.hybrid.HybridSetup.cloudAvailable]). */
     private val cloudAvailable: () -> Boolean = { false },
+    /** A voice message started: whatever will hear it gets ready ([com.local.assistant.llm.NanoFirstBackend.warmEars]). */
+    private val onRecordingStarted: () -> Unit = {},
 ) : ViewModel() {
 
     private val _cloudMode = MutableStateFlow(false)
@@ -446,6 +448,7 @@ class ChatViewModel(
         val destination = attachments.newAudioFile()
         // Written down as it's said, so the words are ready about when the user stops.
         val words = transcriber?.start()
+        onRecordingStarted()
         recorder.start(destination, onAudio = words?.let { it::feed }) { recording ->
             if (recording != null) viewModelScope.launch { sendVoice(recording, words?.finish()) } else words?.cancel()
         }
@@ -515,7 +518,10 @@ class ChatViewModel(
     fun undo(recordId: Long) {
         viewModelScope.launch {
             when (tools.undo(recordId)) {
-                ToolExecutor.UndoResult.UNDONE -> conversations.prefixMayHaveChanged()
+                ToolExecutor.UndoResult.UNDONE -> {
+                    conversations.toolCallUndone()
+                    conversations.prefixMayHaveChanged()
+                }
                 ToolExecutor.UndoResult.CHANGED_SINCE -> _error.value = "That has changed since, so it was left as it is."
                 else -> Unit
             }
@@ -594,6 +600,7 @@ class ChatViewModel(
                     phoneKills = container.phoneKills,
                     onPhoneKillsAnswered = container::toldAboutPhoneKills,
                     cloudAvailable = { container.hybridSetup.cloudAvailable },
+                    onRecordingStarted = container.chatBackend::warmEars,
                 )
             }
         }

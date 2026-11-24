@@ -290,6 +290,7 @@ class AppContainer(context: Context) {
         nano = com.local.assistant.llm.AiCoreBackend(),
         gemma = llmBackend,
         foreground = { appForeground.isForeground },
+        scope = appScope,
     )
 
     private val summarizer = Summarizer(llmBackend, tokenEstimator)
