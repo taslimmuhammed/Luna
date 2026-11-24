@@ -1,0 +1,22 @@
+# Build output and caches
+build/
+.gradle/
+.kotlin/
+.cxx/
+*.apk
+*.aab
+
+# Room writes these on every build
+app/schemas/
+
+# Secrets and machine-specific settings: never commit
+local.properties
+app/google-services.json
+keystore.properties
+*.jks
+*.keystore
+
+# IDE and OS
+.idea/
+*.iml
+.DS_Store
