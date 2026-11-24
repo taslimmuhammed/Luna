@@ -197,7 +197,8 @@ fun ChatScreen(
         CloudConsentDialog(onAgree = { viewModel.answerCloudConsent(true) }, onDismiss = { viewModel.answerCloudConsent(false) })
     }
     // A chat that has used Cloud says under every message where it went, and switches are marked.
-    val showWhere = cloudMode || messages.any { it.cloud }
+    // Trial: Nano replies are labelled too, to tell them from Gemma's.
+    val showWhere = cloudMode || messages.any { it.cloud || it.servedBy != null }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     // Back in view (from the panel, Settings, another app): what it shows is made ready again.
     LaunchedEffect(lifecycle) {

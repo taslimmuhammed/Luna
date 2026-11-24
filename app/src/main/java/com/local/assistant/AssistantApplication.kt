@@ -282,6 +282,16 @@ class AppContainer(context: Context) {
 
     val llmBackend: LlmBackend = LiteRtLmBackend(llmService, settings)
 
+    /**
+     * Trial (branch aicore-trial): Local chats on Gemini Nano through AICore while the app is in
+     * front, on Gemma otherwise. Background jobs stay on [llmBackend].
+     */
+    val chatBackend = com.local.assistant.llm.NanoFirstBackend(
+        nano = com.local.assistant.llm.AiCoreBackend(),
+        gemma = llmBackend,
+        foreground = { appForeground.isForeground },
+    )
+
     private val summarizer = Summarizer(llmBackend, tokenEstimator)
 
     val modelScheduler = ModelScheduler()
@@ -408,7 +418,7 @@ class AppContainer(context: Context) {
     )
 
     val conversations = ConversationManager(
-        backend = llmBackend,
+        backend = chatBackend,
         chats = chatRepository,
         memory = memoryRepository,
         settings = settings,
@@ -653,8 +663,8 @@ class AppContainer(context: Context) {
     private val toolLoop = ToolLoop(
         executor = toolExecutor,
         maxRounds = MemoryBudget.SIXTEEN_K.maxToolRounds,
-        isOverflow = llmBackend::isContextOverflow,
-        isUnreadable = llmBackend::isUnreadableToolCall,
+        isOverflow = chatBackend::isContextOverflow,
+        isUnreadable = chatBackend::isUnreadableToolCall,
         repair = ToolCallRepair(ToolCatalog.declarations(web = true, photos = true, health = true, files = true, inbox = true))::repair,
         onNumberFixed = { wrote, source -> Log.i("ReplyGrounding", "Reply wrote ${LogText.of(wrote)}; the source has ${LogText.of(source)}") },
         groundNumbers = { !llmService.exactDigits },
@@ -880,6 +890,7 @@ class AppContainer(context: Context) {
         llmService,
         turnRunner,
         appScope,
+        local = chatBackend,
         cloud = ChatSender.Cloud(cloudTurnRunner, cloudBackend, available = { hybridSetup.cloudAvailable }),
     )
 

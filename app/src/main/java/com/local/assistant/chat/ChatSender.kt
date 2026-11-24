@@ -41,6 +41,8 @@ class ChatSender(
     private val llm: LlmService,
     private val turns: TurnRunner,
     private val scope: CoroutineScope,
+    /** Trial: what Local chats run on, to tell a Nano reply from a Gemma one. */
+    private val local: com.local.assistant.llm.NanoFirstBackend? = null,
     /** Cloud mode, where the build has it ([com.local.assistant.hybrid.CloudScope]). */
     private val cloud: Cloud? = null,
 ) {
@@ -336,12 +338,18 @@ class ChatSender(
                         // Stopped for an unlock: whatever the model began to say isn't the answer.
                         if (needsUnlock) reply.clear()
                         if (reply.isNotEmpty()) {
-                            val stats = if (inCloud) cloud?.backend?.lastStats?.value else llm.lastGenerationStats.value
+                            val onNano = !inCloud && local?.lastWasNano?.value == true
+                            val stats = when {
+                                inCloud -> cloud?.backend?.lastStats?.value
+                                onNano -> local?.lastStats?.value
+                                else -> llm.lastGenerationStats.value
+                            }
                             // Who wrote it, for the line under it: the app itself, the phone's model, or the cloud's.
                             val byApp = timing.conversation in ANSWERED_BY_APP
                             val servedBy = when {
                                 byApp -> ServedBy.APP
                                 inCloud -> cloud?.backend?.lastServedBy?.value ?: ServedBy.CLOUD
+                                onNano -> ServedBy.NANO
                                 else -> ServedBy.GEMMA
                             }
                             assistantMessageId = repository.addMessage(
