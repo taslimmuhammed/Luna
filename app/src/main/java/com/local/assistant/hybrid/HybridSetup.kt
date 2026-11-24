@@ -103,13 +103,22 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
     val liteModel: String
         get() = config(KEY_LITE_MODEL, DEFAULT_LITE_MODEL)
 
-    /** Which Gemini Nano: the preview (Nano 4, on phones enrolled in AICore's preview) or the stable one. */
+    /**
+     * Which Gemini Nano: the preview (Nano 4, on phones enrolled in AICore's preview) or the stable
+     * one. Remote Config can say; when it doesn't, whichever the phone has ([refreshNano]). The
+     * test phone, in the preview, ran Nano 4 while the stable one was only downloadable, so with
+     * the stable one fixed a Cloud chat that couldn't reach Gemini had no Nano to fall back on.
+     */
     val nanoOption: OnDeviceModelOption
-        get() = when (config(KEY_NANO_OPTION, "stable")) {
+        get() = when (config(KEY_NANO_OPTION, "")) {
             "preview" -> OnDeviceModelOption.PREVIEW
             "preview_fast" -> OnDeviceModelOption.PREVIEW_FAST
-            else -> OnDeviceModelOption.STABLE
+            "stable" -> OnDeviceModelOption.STABLE
+            else -> foundOption
         }
+
+    /** The Nano the phone has, as [refreshNano] last found; the stable one until it looks. */
+    @Volatile private var foundOption: OnDeviceModelOption = OnDeviceModelOption.STABLE
 
     private fun config(key: String, default: String): String =
         if (!configured) default else runCatching { Firebase.remoteConfig.getString(key) }.getOrNull()?.takeIf { it.isNotBlank() } ?: default
@@ -117,22 +126,32 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
     fun ai(): FirebaseAI = Firebase.ai(backend = GenerativeBackend.googleAI())
 
     /** A model that only ever runs on the phone: Gemini Nano, or nothing. */
-    fun nanoModel(maxOutputTokens: Int = NANO_MAX_OUTPUT, temperature: Float = 0.4f): GenerativeModel = ai().generativeModel(
+    fun nanoModel(maxOutputTokens: Int = NANO_MAX_OUTPUT, temperature: Float = 0.4f, option: OnDeviceModelOption = nanoOption): GenerativeModel = ai().generativeModel(
         modelName = cloudModel,
         onDeviceConfig = OnDeviceConfig(
             mode = InferenceMode.ONLY_ON_DEVICE,
             maxOutputTokens = maxOutputTokens,
             temperature = temperature,
-            modelOption = nanoOption,
+            modelOption = option,
         ),
     )
 
     /** Asks AICore what it has of Nano. */
     suspend fun refreshNano(): Nano {
         if (!configured) return Nano.UNAVAILABLE.also { _nano.value = it }
-        val status = runCatching { nanoModel().onDeviceExtension?.checkStatus() }
+        suspend fun statusOf(option: OnDeviceModelOption) = runCatching { nanoModel(option = option).onDeviceExtension?.checkStatus() }
             .onFailure { Log.i(TAG, "Nano status unknown: ${it.javaClass.simpleName}: ${it.message}") }
             .getOrNull()
+        var status = statusOf(nanoOption)
+        // Not set in Remote Config, and no stable Nano yet: the preview one, if the phone runs it.
+        if (status != OnDeviceModelStatus.AVAILABLE && config(KEY_NANO_OPTION, "").isEmpty() && foundOption == OnDeviceModelOption.STABLE) {
+            val preview = statusOf(OnDeviceModelOption.PREVIEW)
+            if (preview == OnDeviceModelStatus.AVAILABLE) {
+                Log.i(TAG, "No stable Gemini Nano here; using the preview one")
+                foundOption = OnDeviceModelOption.PREVIEW
+                status = preview
+            }
+        }
         val nano = when (status) {
             OnDeviceModelStatus.AVAILABLE -> Nano.AVAILABLE
             OnDeviceModelStatus.DOWNLOADABLE -> Nano.DOWNLOADABLE

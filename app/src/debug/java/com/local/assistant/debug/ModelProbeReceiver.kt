@@ -68,6 +68,14 @@ class ModelProbeReceiver : BroadcastReceiver() {
                         cases = cases,
                         gemma = intent.getBooleanExtra("gemma", false),
                     )
+                    // Puts back what tool calls changed, through the app's own undo: --es records 245,234
+                    "undo" -> intent.getStringExtra("records").orEmpty().split(',').mapNotNull { it.trim().toLongOrNull() }.forEach { id ->
+                        log("- undo $id: ${container.toolExecutor.undo(id)}")
+                    }
+                    "cloud" -> CloudProbe(container, ::log).run(
+                        text = intent.getStringExtra("text") ?: "What's the capital of Australia? Answer in one sentence.",
+                        chatId = intent.getLongExtra("chat", -1L).takeIf { it > 0 },
+                    )
                     "voice" -> VoiceBench(context, container.llmBackend, ::log).run(download = intent.getBooleanExtra("download", false))
                     else -> ModelProbe(context, container.llmBackend, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
                 }

@@ -85,6 +85,28 @@ class FirebaseBackend(
     private val _lastStats = MutableStateFlow<GenStats?>(null)
     val lastStats: StateFlow<GenStats?> = _lastStats.asStateFlow()
 
+    /**
+     * Until when (elapsed-realtime ms) the main model is passed over for the lighter one. On the
+     * free tier it allows 5 requests a minute, failed ones included, and it was often "experiencing
+     * high demand" (24 Nov 2026): every Cloud message spent two requests and ~9 s on it before the
+     * lighter model answered, and once the minute's 5 were gone the turn failed outright. Each
+     * model has its own quota, so the lighter one answers meanwhile.
+     */
+    @Volatile private var mainRestingUntil = 0L
+
+    internal fun mainResting(): Boolean = SystemClock.elapsedRealtime() < mainRestingUntil
+
+    /** The main model failed with [error]: if it's overloaded or out of quota, it rests a while. */
+    internal fun restMain(name: String, error: Throwable) {
+        val ms = when {
+            error is QuotaExceededException -> retryAfterMs(error) ?: QUOTA_REST_MS
+            busy(error) -> BUSY_REST_MS
+            else -> return
+        }.coerceIn(5_000L, MAX_REST_MS)
+        mainRestingUntil = maxOf(mainRestingUntil, SystemClock.elapsedRealtime() + ms)
+        Log.i(TAG, "$name ${if (error is QuotaExceededException) "is out of quota" else "is overloaded"}; the lighter model answers for ${ms / 1000} s")
+    }
+
     /** Before a turn: nothing answered it yet. A turn the app answered itself leaves it null. */
     fun beginTurn() {
         _lastServedBy.value = null
@@ -235,7 +257,7 @@ class FirebaseBackend(
             }
             if (calls.isNotEmpty()) {
                 contents += Content("model", calls)
-                contents += Content("function", results)
+                contents += Content(TOOL_RESULTS_ROLE, results)
             }
         }
         return normalized(contents)
@@ -323,6 +345,36 @@ class FirebaseBackend(
          * Gemini is overloaded for now ("experiencing high demand", 503 or 500): worth trying
          * again in a moment, then another model.
          */
+        /**
+         * The role tool results go back to Gemini in. The Gemini Developer API (the backend
+         * [HybridSetup.ai] uses) refuses "function": "Role 'function' is not supported. Please use
+         * a valid role: user, model." Every Cloud turn that called a tool ran it and then failed
+         * with no reply (24 Nov 2026). Results in a user turn are what it takes.
+         */
+        internal const val TOOL_RESULTS_ROLE = "user"
+
+        /**
+         * How long Gemini says its quota needs, in ms: "Please retry in 38.88s." for the minute's
+         * requests, "Please retry in 19h41m16.2s." for the day's (the free tier's 20 a day).
+         */
+        internal fun retryAfterMs(error: Throwable): Long? {
+            val match = RETRY_IN.find(error.message.orEmpty()) ?: return null
+            val (h, m, sec) = match.destructured
+            if (h.isEmpty() && m.isEmpty() && sec.isEmpty()) return null
+            return ((h.toLongOrNull() ?: 0) * 3_600_000) + ((m.toLongOrNull() ?: 0) * 60_000) + ((sec.toDoubleOrNull() ?: 0.0) * 1000).toLong()
+        }
+
+        private val RETRY_IN = Regex("retry in (?:(\\d+)h)?(?:(\\d+)m(?!s))?(?:(\\d+(?:\\.\\d+)?)s)?", RegexOption.IGNORE_CASE)
+
+        /** How long an overloaded main model is passed over. */
+        const val BUSY_REST_MS = 120_000L
+
+        /** How long a main model out of quota is passed over when Gemini doesn't say. */
+        const val QUOTA_REST_MS = 60_000L
+
+        /** A day's quota comes back the next day: never asked before then. */
+        const val MAX_REST_MS = 24 * 3_600_000L
+
         internal fun busy(error: Throwable): Boolean =
             error is RequestTimeoutException ||
                 (error is ServerException && BUSY.containsMatchIn(error.message.orEmpty()))
@@ -366,7 +418,7 @@ private class CloudChatSession(
     }.flowOn(Dispatchers.IO)
 
     override fun sendToolResults(results: List<ToolResult>): Flow<GenEvent> = flow {
-        val answered = answerPending(results) ?: Content("function", results.map { FunctionResponsePart(it.name, SchemaJson.result(it.json)) })
+        val answered = answerPending(results) ?: Content(FirebaseBackend.TOOL_RESULTS_ROLE, results.map { FunctionResponsePart(it.name, SchemaJson.result(it.json)) })
         backend.record(spec.chatId, CloudLedger.Kind.TOOL_RESULTS, ToolReplay.asMessage(results))
         emitAll(stream(listOf(answered), fallbackPrompt = null))
     }.flowOn(Dispatchers.IO)
@@ -384,7 +436,7 @@ private class CloudChatSession(
             )
         } + left.map { FunctionResponsePart(it.name, SchemaJson.result(it.json)) }
         pending = emptyList()
-        return Content("function", parts)
+        return Content(FirebaseBackend.TOOL_RESULTS_ROLE, parts)
     }
 
     private fun stream(added: List<Content>, fallbackPrompt: String?): Flow<GenEvent> = flow {
@@ -407,11 +459,16 @@ private class CloudChatSession(
         val started = SystemClock.elapsedRealtime()
         var firstAt: Long? = null
         var failure: Throwable? = null
-        // Overloaded: the same model again after a moment, then the lighter one. Only while nothing
-        // has been shown or asked for, since that can't be taken back and asked again.
-        tries@ for ((index, entry) in models.withIndex()) {
+        // The main model, then the lighter one; the lighter one first while the main one rests
+        // (FirebaseBackend.restMain). Only while nothing has been shown or asked for, since that
+        // can't be taken back and asked again.
+        val main = models.first().first
+        val order = if (models.size > 1 && backend.mainResting()) models.drop(1) + models.take(1) else models
+        tries@ for (entry in order) {
             val (name, model) = entry
-            for (attempt in 0 until if (index == 0) MAIN_TRIES else 1) {
+            // Alone, an overloaded model is worth a second try after a moment; with another to ask,
+            // that one is quicker, and a retry spends quota.
+            for (attempt in 0 until if (order.size == 1) SOLE_TRIES else 1) {
                 if (attempt > 0) delay(RETRY_DELAY_MS * attempt)
                 failure = null
                 signature = null
@@ -419,15 +476,17 @@ private class CloudChatSession(
                 streamFrom(model, request, text, calls, other, started, onSignature = { signature = it }, onUsage = { usage = it ?: usage }, onSource = { source = it ?: source }, onFirst = { if (firstAt == null) firstAt = it })
                     .also { failure = it }
                 val error = failure ?: run {
-                    if (index > 0) Log.i(TAG, "Answered by $name, the fallback")
+                    if (name != main) Log.i(TAG, "Answered by $name, the lighter model")
                     break@tries
                 }
                 if (text.isNotEmpty() || calls.isNotEmpty()) break@tries
-                Log.i(TAG, "$name failed (try ${attempt + 1}): ${error.javaClass.simpleName}: ${error.message}")
-                if (!FirebaseBackend.busy(error)) {
-                    // The same model would fail the same way; another may not (one the project lacks).
-                    if (error is ServerException && !backend.isContextOverflow(error)) continue@tries else break@tries
-                }
+                Log.i(TAG, "$name failed (try ${attempt + 1}): ${error.javaClass.simpleName}: ${error.message?.lineSequence()?.firstOrNull()}")
+                if (name == main) backend.restMain(name, error)
+                // Out of quota or overloaded, another model has its own; a server error may be this
+                // model's alone (one the project lacks). Anything else, another would fail too.
+                val busy = FirebaseBackend.busy(error)
+                if (!busy && error !is QuotaExceededException && !(error is ServerException && !backend.isContextOverflow(error))) break@tries
+                if (!busy) continue@tries
             }
         }
         val error = failure
@@ -547,8 +606,8 @@ private class CloudChatSession(
         const val TAG = "CloudChatSession"
         const val NANO_TURNS = 6
 
-        /** Tries of the main model when Gemini is overloaded, before the lighter one. */
-        const val MAIN_TRIES = 2
+        /** Tries of an overloaded model when there is no other to ask. */
+        const val SOLE_TRIES = 2
 
         /** The wait before a retry, times the try's number. */
         const val RETRY_DELAY_MS = 1_500L
@@ -563,7 +622,9 @@ class CloudError(message: String, cause: Throwable) : Exception(message, cause) 
         fun of(error: Throwable): CloudError = CloudError(
             when {
                 FirebaseBackend.busy(error) -> "Gemini is overloaded right now, and the lighter model too. Try again in a minute, or switch this chat to Local."
-                FirebaseBackend.unreachable(error) && error is QuotaExceededException -> "The cloud model is busy right now. Try again in a minute, or switch this chat to Local."
+                error is QuotaExceededException -> "Cloud mode has used up Gemini's free requests for now" +
+                    (FirebaseBackend.retryAfterMs(error)?.let { " (they come back in ${(it + 999) / 1000} s)" } ?: "") +
+                    ". Try again then, or switch this chat to Local."
                 FirebaseBackend.unreachable(error) -> "Couldn't reach the cloud. Check the connection, or switch this chat to Local: it works offline."
                 else -> "The cloud model couldn't answer (${error.javaClass.simpleName}). Try again, or switch this chat to Local."
             },
