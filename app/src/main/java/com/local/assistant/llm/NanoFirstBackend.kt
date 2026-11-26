@@ -1,41 +1,34 @@
 package com.local.assistant.llm
 
 import android.util.Log
-import com.local.assistant.data.db.AttachmentKind
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Trial (branch aicore-trial): Local chats on Gemini Nano through AICore while the app is in
- * front and the phone has Nano, and on [gemma] otherwise.
+ * Local chats on Gemini Nano through AICore while the app is in front and the phone has Nano, and
+ * on [gemma] otherwise. The assistant overlay is a screen of the app's own, so it counts as in
+ * front and is answered by Nano too.
  *
- * AICore refuses any request from an app that isn't in the foreground (ErrorCode 30), so a chat
- * opened with the app in the background (the wake-word panel over another app) stays on Gemma.
- * One-shot jobs ([complete]) are background work here (summaries, extraction), so Gemma does them.
+ * AICore refuses any request from an app that isn't in the foreground, or made over the lock
+ * screen (ErrorCode 30), so a chat sent then goes to Gemma. One-shot jobs ([complete]) are
+ * background work here (summaries, extraction), so Gemma does them.
  *
  * The prompt is planned for the smaller of the two windows, so a chat can go to either.
  *
- * Nano can't hear, so a voice message reaches it as the phone's recogniser wrote it down. Gemma
- * hears the recording and puts the words right first when it is loaded ([hear]); [warmEars]
- * loads it while the user is still speaking.
+ * Nano can't hear: a voice message reaches it as words, written down by ML Kit's speech
+ * recognition or the phone's recogniser ([com.local.assistant.voice.Transcriber]).
  */
 class NanoFirstBackend(
     private val nano: AiCoreBackend,
     private val gemma: LlmBackend,
     private val foreground: () -> Boolean,
-    private val scope: CoroutineScope,
+    /** The phone is locked: AICore won't answer over the lock screen. */
+    private val locked: () -> Boolean = { false },
 ) : LlmBackend {
-
-    init {
-        nano.ears = ::hear
-    }
 
     /** Whether the last reply streamed came from Nano. */
     private val _lastWasNano = MutableStateFlow(false)
@@ -52,7 +45,30 @@ class NanoFirstBackend(
 
     private fun resting(): Boolean = android.os.SystemClock.elapsedRealtime() < restingUntil
 
-    private fun useNano(): Boolean = foreground() && nanoReady() && !resting()
+    /**
+     * Nano will take the next message once the app is in front: the phone has it, AICore isn't
+     * resting it, and the phone isn't locked. A screen being opened counts before the app does
+     * (the overlay's chat is made ready in its first moment), so this leaves the app out.
+     */
+    private fun nanoWillAnswer(): Boolean = nanoReady() && !resting() && !locked()
+
+    private fun useNano(): Boolean = foreground() && nanoWillAnswer()
+
+    /**
+     * Whether Nano answers chats here now, asking AICore the first time: the screens then show Nano
+     * as ready and leave Gemma unloaded. False over the lock screen and while Nano rests.
+     */
+    suspend fun answersOnPhone(): Boolean {
+        if (!nanoReady()) runCatching { nano.inspect() }.onFailure { Log.w(TAG, "AICore check failed", it) }
+        return nanoWillAnswer()
+    }
+
+    /**
+     * The chat's model as a screen shows it: ready while Nano answers ([onPhone], from
+     * [answersOnPhone]), whatever Gemma is doing; Gemma's [gemmaState] otherwise.
+     */
+    fun shownState(gemmaState: LlmService.State, onPhone: Boolean): LlmService.State =
+        if (onPhone) LlmService.State.Ready(backend = "Gemini Nano", contextTokens = nano.capabilities?.maxContextTokens ?: 0) else gemmaState
 
     /**
      * AICore refusing to run the request rather than the model failing: over the app's quota
@@ -79,54 +95,18 @@ class NanoFirstBackend(
 
     override suspend fun ensureReady(): Boolean {
         val phone = runCatching { nano.ensureReady() }.onFailure { Log.w(TAG, "AICore check failed", it) }.getOrDefault(false)
-        // Only when Nano will answer: while it rests after AICore refused it, the chat is rebuilt on
-        // Gemma, which has to be loaded first. Returning true for any app in front opened that
-        // chat on an unloaded Gemma, and the turn failed with no reply (the user's chat, 24 Nov 2026).
-        if (phone && useNano()) return true
+        // Only when Nano will answer: while it rests after AICore refused it, or over the lock
+        // screen, the chat is on Gemma, which has to be loaded first. Returning true for any app in
+        // front opened that chat on an unloaded Gemma, and the turn failed with no reply (the
+        // user's chat, 24 Nov 2026). The app being in front isn't asked: the overlay makes its chat
+        // ready before it counts as in front, and loaded Gemma for nothing.
+        if (phone && nanoWillAnswer()) return true
         return gemma.ensureReady()
-    }
-
-    /** A voice message is being recorded: Gemma loads meanwhile, to hear it ([hear]). */
-    fun warmEars() {
-        if (!useNano() || gemma.capabilities != null) return
-        scope.launch { runCatching { gemma.ensureReady() }.onFailure { Log.w(TAG, "Gemma didn't load to hear a voice message", it) } }
-    }
-
-    /**
-     * The words of the recording at [path], as Gemma hears them with the phone's [words] beside
-     * it; null when Gemma isn't loaded or takes too long, and the phone's words go as they are.
-     * On the user's 14 voice messages (VoiceBench, 24 Nov 2026) it put right 2 of the phone's 3
-     * misheard names ("send hi to mount" → "Umma", "co QR code" → "Shiyas QR code") and changed no
-     * right one, in ~1 s; AICore's own recogniser (basic, the only one on the phone) fixed 1 and
-     * got 2 others wrong.
-     */
-    private suspend fun hear(path: String, words: String): String? {
-        if (gemma.capabilities == null) return null
-        val started = android.os.SystemClock.elapsedRealtime()
-        val heard = withTimeoutOrNull(EARS_TIMEOUT_MS) {
-            val session = gemma.openChat(
-                ChatSpec(systemPrefix = EARS_SYSTEM, history = emptyList(), sampling = Sampling.BACKGROUND, maxOutputTokens = EARS_MAX_TOKENS),
-            )
-            try {
-                val out = StringBuilder()
-                session.send(
-                    "The phone's speech recogniser wrote this recording as: \"$words\". Listen to the recording and write what was said, " +
-                        "word for word, fixing any name or number it misheard. Write only the words.",
-                    PromptAttachment(path, AttachmentKind.AUDIO),
-                ).collect { if (it is GenEvent.TextDelta) out.append(it.text) }
-                out.toString()
-            } finally {
-                session.close()
-            }
-        }?.trim()?.trim('"')
-        Log.i(TAG, "Gemma heard the voice message in ${android.os.SystemClock.elapsedRealtime() - started} ms; ${if (heard == null) "kept the phone's words" else if (heard.equals(words, ignoreCase = true)) "same words" else "words changed"}")
-        // Something other than the words (an answer, a refusal) is no transcript.
-        return heard?.takeIf { it.isNotBlank() && it.length <= words.length * 2 + 20 }
     }
 
     override suspend fun openChat(spec: ChatSpec): ChatSession {
         if (!nanoReady()) runCatching { nano.inspect() }
-        val onNano = useNano()
+        val onNano = nanoWillAnswer()
         Log.i(TAG, "Chat on ${if (onNano) "Gemini Nano" else "Gemma"}")
         val session = if (onNano) nano.openChat(spec) else gemma.openChat(spec)
         return Routed(session, onNano, spec)
@@ -150,7 +130,9 @@ class NanoFirstBackend(
      * A session that says, as it replies, which model it is on. One opened on Gemma moves to Nano
      * at its first message if Nano can answer by then: a chat is made ready as it is shown, a
      * moment before the app counts as in front, and stayed on Gemma for good (the user's chat,
-     * 24 Nov 2026: Gemma answered from "continue the Website" on, and saved code to a note).
+     * 24 Nov 2026: Gemma answered from "continue the Website" on, and saved code to a note). One
+     * opened on Nano moves to Gemma if the app isn't in front when its first message goes, which
+     * AICore would refuse.
      */
     private inner class Routed(
         @Volatile private var inner: ChatSession,
@@ -167,11 +149,13 @@ class NanoFirstBackend(
         override fun send(envelope: String, attachments: List<PromptAttachment>): Flow<GenEvent> = flow {
             if (!used) {
                 used = true
-                if (!onNano && useNano()) {
-                    Log.i(TAG, "Chat moved to Gemini Nano before its first message")
+                val nanoNow = useNano()
+                if (nanoNow != onNano) {
+                    Log.i(TAG, "Chat moved to ${if (nanoNow) "Gemini Nano" else "Gemma"} before its first message")
                     runCatching { inner.close() }
-                    inner = nano.openChat(spec)
-                    onNano = true
+                    if (!nanoNow) gemma.ensureReady()
+                    inner = if (nanoNow) nano.openChat(spec) else gemma.openChat(spec)
+                    onNano = nanoNow
                 }
             }
             emitAll(mark(inner.send(envelope, attachments)))
@@ -205,11 +189,6 @@ class NanoFirstBackend(
         const val PLANNED_WITHOUT_GEMMA = 8_192
 
         const val REST_MS = 60_000L
-
-        /** How long a voice message waits for Gemma to hear it; ~1 s when loaded. */
-        const val EARS_TIMEOUT_MS = 5_000L
-        const val EARS_MAX_TOKENS = 96
-        const val EARS_SYSTEM = "You write down voice messages exactly as spoken. The speaker is in India and may use Malayalam names and words."
 
         private val REFUSALS = setOf(
             com.google.mlkit.genai.common.GenAiException.ErrorCode.BUSY,

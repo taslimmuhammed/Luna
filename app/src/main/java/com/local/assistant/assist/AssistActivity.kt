@@ -66,6 +66,8 @@ class AssistActivity : FragmentActivity() {
     private val blurred = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Before the app counts as in front, which would otherwise load Gemma for nothing.
+        appContainer.overlayOpen = true
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
@@ -140,6 +142,11 @@ class AssistActivity : FragmentActivity() {
         super.onStop()
         // Out of sight, out of the way: an overlay left behind would sit in its own task.
         if (!isChangingConfigurations && !awaitingUnlock && !awaitingPermission && !isFinishing) close()
+    }
+
+    override fun onDestroy() {
+        if (!isChangingConfigurations) appContainer.overlayOpen = false
+        super.onDestroy()
     }
 
     private fun isLocked(): Boolean = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true

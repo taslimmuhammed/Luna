@@ -151,7 +151,11 @@ class AppContainer(context: Context) {
             com.local.assistant.memory.prompt.TurnTimings.event("app_back")
             backgroundJobs.onForeground()
             speaker.setAway(false)
-            if (settings.modelPath != null) llmService.warmUp()
+            if (settings.modelPath != null) {
+                appScope.launch { if (!overlayOpen || !chatBackend.answersOnPhone()) llmService.warmUp() }
+            }
+            // ML Kit's speech model, downloaded by AICore if the phone can have it ([SpeechModel]).
+            speechModel.refresh()
             // A new chat on screen: its conversation made ready again if it went meanwhile.
             conversations.cameIntoSight()
             embeddingQueue.kick()
@@ -283,15 +287,23 @@ class AppContainer(context: Context) {
     val llmBackend: LlmBackend = LiteRtLmBackend(llmService, settings)
 
     /**
-     * Trial (branch aicore-trial): Local chats on Gemini Nano through AICore while the app is in
-     * front, on Gemma otherwise. Background jobs stay on [llmBackend].
+     * Local chats, the overlay's included, on Gemini Nano through AICore while the app is in front
+     * and the phone is unlocked, on Gemma otherwise. Background jobs stay on [llmBackend].
      */
     val chatBackend = com.local.assistant.llm.NanoFirstBackend(
         nano = com.local.assistant.llm.AiCoreBackend(),
         gemma = llmBackend,
         foreground = { appForeground.isForeground },
-        scope = appScope,
+        locked = { context.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true },
     )
+
+    /**
+     * The assistant overlay is open. Coming to the front for it doesn't load Gemma when Nano
+     * answers it; the app's own screens still do, for what only Gemma does yet (reading found
+     * photos and documents, the lock screen).
+     */
+    @Volatile
+    var overlayOpen: Boolean = false
 
     private val summarizer = Summarizer(llmBackend, tokenEstimator)
 
@@ -660,7 +672,11 @@ class AppContainer(context: Context) {
                 }
             },
             mayRead = { context.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked != true },
-            reader = { path, question -> if ((llmService.capabilities.value?.visionTokensPerImage ?: 0) > 0) photoReader.answer(path, question) else null },
+            // Gemma reads found photos, loaded now if a Nano chat left it unloaded; not a model
+            // that turned out to take no images.
+            reader = { path, question ->
+                if (settings.modelPath != null && llmService.modalities.value?.vision != false) photoReader.answer(path, question) else null
+            },
             documents = { field -> fileTools.idNumber(field) },
         ),
         health = healthTools,
@@ -697,7 +713,8 @@ class AppContainer(context: Context) {
         repair = ToolCallRepair(ToolCatalog.declarations(web = true, photos = true, health = true, files = true, inbox = true))::repair,
         onNumberFixed = { wrote, source -> Log.i("ReplyGrounding", "Reply wrote ${LogText.of(wrote)}; the source has ${LogText.of(source)}") },
         groundNumbers = { !llmService.exactDigits },
-        seesImages = { (llmService.capabilities.value?.visionTokensPerImage ?: 0) > 0 },
+        // The chat's model, Nano or Gemma: Nano takes one image a request, with Gemma unloaded.
+        seesImages = { (chatBackend.capabilities?.visionTokensPerImage ?: 0) > 0 },
         onUnbackedClaim = { said -> Log.i("ActionClaims", "Held back, no tool ran: ${LogText.of(said.take(200))}") },
         photosAvailable = ::photoSearchReady,
     )
@@ -912,8 +929,11 @@ class AppContainer(context: Context) {
 
     val audioRecorder = AudioRecorder(appScope)
 
-    /** Voice messages written down as they're recorded, by the phone's own recogniser. */
-    val transcriber = com.local.assistant.voice.Transcriber(context, appScope)
+    /** ML Kit's advanced speech recognition, on the Gemini model AICore keeps, where the phone has it. */
+    val speechModel = com.local.assistant.voice.SpeechModel(context, appScope)
+
+    /** Voice messages written down as they're recorded: by the phone's own recogniser, and by [speechModel] when that makes nothing out. */
+    val transcriber = com.local.assistant.voice.Transcriber(context, appScope, speechModel)
 
     /**
      * Auto mode (hybrid/AutoRouter): the phone's model, which may ask Gemini a question it writes,

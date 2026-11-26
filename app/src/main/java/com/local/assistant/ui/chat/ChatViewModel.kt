@@ -81,8 +81,8 @@ class ChatViewModel(
     private val onPhoneKillsAnswered: () -> Unit = {},
     /** Cloud mode is in this build and on ([com.local.assistant.hybrid.HybridSetup.cloudAvailable]). */
     private val cloudAvailable: () -> Boolean = { false },
-    /** A voice message started: whatever will hear it gets ready ([com.local.assistant.llm.NanoFirstBackend.warmEars]). */
-    private val onRecordingStarted: () -> Unit = {},
+    /** Local chats' model: Gemini Nano where it answers, Gemma otherwise. */
+    private val local: com.local.assistant.llm.NanoFirstBackend? = null,
     /** The mode a new chat starts in, as it would now ([com.local.assistant.AppContainer.newChatsMode]). */
     private val newChatsMode: () -> ChatMode = { ChatMode.LOCAL },
     /** Auto's questions held for the user's say-so ([AskConfirm]); none without the cloud. */
@@ -250,7 +250,18 @@ class ChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    val engineState: StateFlow<LlmService.State> = llm.state
+    /** Gemini Nano answers Local chats here ([com.local.assistant.llm.NanoFirstBackend.answersOnPhone]). */
+    private val onPhone = MutableStateFlow(false)
+
+    /** The chat's model as the screen shows it: Nano's ready at once, Gemma's as it loads. */
+    val engineState: StateFlow<LlmService.State> = combine(llm.state, onPhone) { state, phone -> local?.shownState(state, phone) ?: state }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, llm.state.value)
+
+    /** Asks again whether Nano answers: AICore may have finished downloading it, or stopped resting it. */
+    private fun checkOnPhone() {
+        val backend = local ?: return
+        viewModelScope.launch { onPhone.value = backend.answersOnPhone() }
+    }
 
     /** A reply is being read aloud: one to a voice message, or one from its speaker button. */
     val speaking: StateFlow<Boolean> = speaker.speaking
@@ -281,12 +292,14 @@ class ChatViewModel(
 
         // The chat opens at once and the model loads behind it; a message sent before it is ready
         // waits for it. Also covers a model installed just now, which the app's start didn't see.
+        // Gemma still loads behind a Nano chat: it reads found photos and documents.
         llm.warmUp()
+        checkOnPhone()
 
         // What is on screen decides which conversation is made ready: a new chat's at once, once
-        // the model is loaded (ConversationManager.showing).
+        // the model is ready (ConversationManager.showing).
         viewModelScope.launch {
-            combine(_activeChatId, llm.state.map { it is LlmService.State.Ready }.distinctUntilChanged(), ::Pair)
+            combine(_activeChatId, engineState.map { it is LlmService.State.Ready }.distinctUntilChanged(), ::Pair)
                 .collect { (chatId, ready) -> conversations.showing(chatId, ready) }
         }
 
@@ -383,14 +396,21 @@ class ChatViewModel(
     /** How many older turns fell out of the context window for the active chat. */
     val droppedFromContext: StateFlow<Int> = conversations.droppedFromContext
 
-    /** Drives whether the composer offers the image and mic buttons at all. */
-    val supportsImages: StateFlow<Boolean> = llm.modalities
-        .map { it?.vision == true }
+    /**
+     * Drives whether the composer offers the image and mic buttons at all. Nano takes a photo
+     * (one a message) whether or not Gemma is loaded.
+     */
+    val supportsImages: StateFlow<Boolean> = combine(llm.modalities, onPhone) { modalities, phone -> phone || modalities?.vision == true }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    val supportsAudio: StateFlow<Boolean> = llm.modalities
-        .map { it?.audio == true }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    /**
+     * Nano can't hear: a voice message reaches it as words, so the mic is there while the phone
+     * can write them down (ML Kit's speech recognition or the phone's recogniser). Gemma hears
+     * the recording itself.
+     */
+    val supportsAudio: StateFlow<Boolean> = combine(llm.modalities, onPhone) { modalities, phone ->
+        if (phone) transcriber?.available == true else modalities?.audio == true
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _pendingAttachment = MutableStateFlow<PendingAttachment?>(null)
     val pendingAttachment: StateFlow<PendingAttachment?> = _pendingAttachment.asStateFlow()
@@ -433,7 +453,10 @@ class ChatViewModel(
     }
 
     /** The chat screen came into view again (back from the panel, Settings or another app). */
-    fun onScreenShown() = conversations.showing(_activeChatId.value, llm.state.value is LlmService.State.Ready)
+    fun onScreenShown() {
+        checkOnPhone()
+        conversations.showing(_activeChatId.value, engineState.value is LlmService.State.Ready)
+    }
 
     fun deleteChat(chatId: Long) {
         viewModelScope.launch {
@@ -492,7 +515,6 @@ class ChatViewModel(
         val destination = attachments.newAudioFile()
         // Written down as it's said, so the words are ready about when the user stops.
         val words = transcriber?.start()
-        onRecordingStarted()
         recorder.start(destination, onAudio = words?.let { it::feed }) { recording ->
             if (recording != null) viewModelScope.launch { sendVoice(recording, words?.finish()) } else words?.cancel()
         }
@@ -644,7 +666,7 @@ class ChatViewModel(
                     phoneKills = container.phoneKills,
                     onPhoneKillsAnswered = container::toldAboutPhoneKills,
                     cloudAvailable = { container.hybridSetup.cloudAvailable },
-                    onRecordingStarted = container.chatBackend::warmEars,
+                    local = container.chatBackend,
                     newChatsMode = container::newChatsMode,
                     askConfirm = container.askConfirm,
                     dailyAsks = { container.hybridSetup.autoDailyAsks },

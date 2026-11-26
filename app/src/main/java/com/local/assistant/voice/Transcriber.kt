@@ -15,7 +15,9 @@ import com.local.assistant.media.MediaLimits
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
@@ -23,8 +25,9 @@ import java.util.Locale
 
 /**
  * Writes a voice message down as it is recorded, with the phone's own on-device recogniser (on
- * the test phone, Google's, the one Gboard and the Google app use): no model of ours, nothing
- * sent off the phone ([SpeechRecognizer.createOnDeviceSpeechRecognizer] never does).
+ * the test phone, Google's, the one Gboard and the Google app use), and with ML Kit's advanced
+ * speech recognition as the fallback where the phone has it ([SpeechModel]): no model of ours,
+ * nothing sent off the phone ([SpeechRecognizer.createOnDeviceSpeechRecognizer] never does).
  *
  * The recorder's own audio is fed to it as it comes ([RecognizerIntent.EXTRA_AUDIO_SOURCE]), so
  * the words are ready about when the user stops, and the recording stays what the chat plays
@@ -32,27 +35,78 @@ import java.util.Locale
  * the phone has no on-device recogniser, there is no [Session] and voice messages go as audio, as
  * before.
  */
-class Transcriber(private val context: Context, private val scope: CoroutineScope) {
+class Transcriber(
+    private val context: Context,
+    private val scope: CoroutineScope,
+    /**
+     * ML Kit's advanced speech recognition, where the phone has it: its words go only when the
+     * phone's recogniser made nothing out, or the phone has none. On the user's 14 voice messages
+     * (VoiceBench, 26 Nov 2026) it got the meaning wrong in 4, where the phone's recogniser got 3
+     * wrong, and its misses broke commands: "set a location reminder for me to buy milk" came out
+     * "tell me the location of my inter", "remind me to buy chicken" "We may need to buy chicken".
+     */
+    private val model: SpeechModel? = null,
+) {
 
     /** Whether this phone can write voice messages down. */
     val available: Boolean
+        get() = phoneAvailable || model?.ready == true
+
+    private val phoneAvailable: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 
     /**
      * Starts writing down a recording about to begin; null when it can't. On the main thread, as
      * the recogniser asks. [hints]: phrases to lean towards ([RecognizerIntent.EXTRA_BIASING_STRINGS]);
-     * [alternatives]: how many guesses to ask for each stretch of speech.
+     * [alternatives]: how many guesses to ask for each stretch of speech. Both go to the phone's
+     * recogniser only: ML Kit's model takes neither.
      */
     @MainThread
     fun start(locale: Locale = Locale.getDefault(), hints: List<String> = emptyList(), alternatives: Int = 1): Session? {
-        if (!available) return null
-        return runCatching { Session(locale, hints, alternatives) }
-            .onFailure { Log.w(TAG, "No transcript: the recogniser wouldn't start", it) }
-            .getOrNull()
+        val byModel = model?.start()
+        val byPhone = if (phoneAvailable) {
+            runCatching { PhoneSession(locale, hints, alternatives) }
+                .onFailure { Log.w(TAG, "The phone's recogniser wouldn't start", it) }
+                .getOrNull()
+        } else {
+            null
+        }
+        if (byModel == null && byPhone == null) return null
+        return Session(byPhone, byModel)
     }
 
     /** One recording's words. [feed] it the audio, then [finish] for what was said. */
-    inner class Session internal constructor(locale: Locale, hints: List<String>, alternatives: Int) {
+    inner class Session internal constructor(private val phone: PhoneSession?, private val model: SpeechModel.Session?) {
+
+        /** A chunk of 16 kHz mono 16-bit PCM, from any thread; never blocks. */
+        fun feed(pcm: ByteArray, length: Int) {
+            model?.feed(pcm, length)
+            phone?.feed(pcm, length)
+        }
+
+        /** What was said, or null when nothing was made out. The recording is over. */
+        suspend fun finish(): String? = coroutineScope {
+            val byModel = model?.let { async { it.finish() } }
+            val byPhone = phone?.finish()
+            val heard = byModel?.await()
+            // Counts only: what was said never goes to the log.
+            if (heard != null && byPhone != null) {
+                Log.i(TAG, "The phone's words go; ML Kit's were ${if (byPhone.equals(heard, ignoreCase = true)) "the same" else "different"}")
+            }
+            if (byPhone != null || heard == null) return@coroutineScope byPhone
+            Log.i(TAG, "Words from ML Kit's advanced speech recognition: ${if (phone == null) "no phone recogniser" else "the phone's made nothing out"}")
+            SpokenCommands.repair(heard).ifEmpty { null }
+        }
+
+        /** The recording was thrown away. */
+        fun cancel() {
+            model?.cancel()
+            phone?.cancel()
+        }
+    }
+
+    /** One recording's words by the phone's own recogniser. */
+    inner class PhoneSession internal constructor(locale: Locale, hints: List<String>, alternatives: Int) {
 
         private val pipe = ParcelFileDescriptor.createPipe()
         private val out = ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])
