@@ -58,7 +58,7 @@ import kotlinx.coroutines.Dispatchers
         UserNoteChunkEntity::class,
         UserNoteChunkFts::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -189,7 +189,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, Migration3To4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+        /**
+         * Auto chats: the phone's model, asking Gemini for help with what's private hidden. Each
+         * reply in one says why it came from where it did. Every chat already here keeps its mode.
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(connection: SQLiteConnection) {
+                listOf(
+                    "ALTER TABLE chats ADD COLUMN auto INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE messages ADD COLUMN route TEXT",
+                ).forEach(connection::execSQL)
+            }
+        }
+
+        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, Migration3To4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
 
         /**
          * [withVectors]: sqlite-vec loaded on this device (see [SqliteVec.probe]). Its table is

@@ -1,5 +1,8 @@
 package com.local.assistant.ui.chat
 
+import com.local.assistant.hybrid.ChatMode
+import com.local.assistant.memory.tools.AskView
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -191,14 +194,41 @@ fun ChatScreen(
     val askForNotifications by viewModel.askForNotifications.collectAsStateWithLifecycle()
     val offerExactAlarms by viewModel.offerExactAlarms.collectAsStateWithLifecycle()
     val busyElsewhere by viewModel.busyElsewhere.collectAsStateWithLifecycle()
-    val cloudMode by viewModel.cloudMode.collectAsStateWithLifecycle()
+    val mode by viewModel.mode.collectAsStateWithLifecycle()
+    val cloudMode = mode == ChatMode.CLOUD
     val askCloudConsent by viewModel.askCloudConsent.collectAsStateWithLifecycle()
     if (askCloudConsent) {
         CloudConsentDialog(onAgree = { viewModel.answerCloudConsent(true) }, onDismiss = { viewModel.answerCloudConsent(false) })
     }
-    // A chat that has used Cloud says under every message where it went, and switches are marked.
-    // Trial: Nano replies are labelled too, to tell them from Gemma's.
-    val showWhere = cloudMode || messages.any { it.cloud || it.servedBy != null }
+    val askAutoConsent by viewModel.askAutoConsent.collectAsStateWithLifecycle()
+    if (askAutoConsent) {
+        AutoConsentDialog(onAgree = { viewModel.answerAutoConsent(true) }, onDismiss = { viewModel.answerAutoConsent(false) })
+    }
+    // An Auto question that copies something private out: held for the user's say-so.
+    val pendingAsk by viewModel.pendingAsk.collectAsStateWithLifecycle()
+    pendingAsk?.let { held ->
+        AskConfirmDialog(sent = held.sent, hidden = held.hidden, onSend = { viewModel.answerAsk(true) }, onKeep = { viewModel.answerAsk(false) })
+    }
+    val asksToday by viewModel.asksToday.collectAsStateWithLifecycle()
+    var openAsk by remember { mutableStateOf<AskView?>(null) }
+    openAsk?.let { ask ->
+        GeminiSawSheet(
+            ask,
+            onKeepLocal = {
+                openAsk = null
+                viewModel.setMode(ChatMode.LOCAL)
+            },
+            onOpenLedger = {
+                openAsk = null
+                onOpenCloudLedger()
+            },
+            onDismiss = { openAsk = null },
+        )
+    }
+    // A chat that has used Cloud or Auto says under every message where it went, and switches are
+    // marked. Trial: Nano replies are labelled too, to tell them from Gemma's.
+    val showWhere = mode != ChatMode.LOCAL || messages.any { it.cloud || it.servedBy != null || it.route != null }
+    val sentIn = remember(messages) { modesSentIn(messages) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     // Back in view (from the panel, Settings, another app): what it shows is made ready again.
     LaunchedEffect(lifecycle) {
@@ -496,16 +526,22 @@ fun ChatScreen(
                                 // Where the chat switched: the first message in the other mode.
                                 if (showWhere && message.role == Role.USER) {
                                     val previous = messages.subList(0, index).lastOrNull { it.role == Role.USER }
-                                    if ((previous == null && message.cloud) || (previous != null && previous.cloud != message.cloud)) {
-                                        ModeDivider(toCloud = message.cloud, before = messages.subList(0, index).count { !it.cloud })
+                                    val now = sentIn[message.id] ?: ChatMode.LOCAL
+                                    val was = previous?.let { sentIn[it.id] ?: ChatMode.LOCAL }
+                                    if ((was == null && now != ChatMode.LOCAL) || (was != null && was != now)) {
+                                        ModeDivider(to = now, before = messages.subList(0, index).count { !it.cloud })
                                     }
                                 }
+                                // The reply's route line opens what its question to Gemini sent.
+                                val askOf = chips[message.id]?.firstNotNullOfOrNull { it.chip.ask }
                                 MessageRow(
                                     message,
                                     readingAloud = message.id == readingAloud,
                                     onReadAloud = viewModel::readAloud,
                                     onReport = { reporting = it },
                                     showWhere = showWhere,
+                                    sentIn = sentIn[message.id],
+                                    onOpenRoute = askOf?.let { ask -> { openAsk = ask } },
                                 )
                                 if (message != asking) {
                                     MemoryChips(
@@ -520,6 +556,7 @@ fun ChatScreen(
                                         notePreviews = notePreviews,
                                         onOpenNote = openNote,
                                         onToggleNoteItem = toggleNoteItem,
+                                        onOpenAsk = { openAsk = it },
                                     )
                                 }
                             }
@@ -528,7 +565,7 @@ fun ChatScreen(
                                 item(key = PENDING_QUESTION_KEY) {
                                     UserMessage(
                                         MessageEntity(chatId = activeChatId ?: 0L, role = Role.USER, text = asked, createdAt = 0L, cloud = cloudMode),
-                                        mark = cloudMode.takeIf { showWhere },
+                                        mark = cloudMode.takeIf { showWhere && mode != ChatMode.AUTO },
                                     )
                                 }
                             }
@@ -568,10 +605,12 @@ fun ChatScreen(
                 ContextMeter(contextUsage)
 
                 ModeSwitch(
-                    cloud = cloudMode,
+                    mode = mode,
                     available = viewModel.canUseCloud,
-                    onChange = viewModel::setCloudMode,
+                    onChange = viewModel::setMode,
                     onOpenLedger = onOpenCloudLedger,
+                    asksToday = asksToday,
+                    asksPerDay = viewModel.asksPerDay,
                 )
 
                 if (speaking && recording == null) SpeakingBar(onStop = viewModel::stopSpeaking)
@@ -1139,3 +1178,26 @@ private val ComposerShape = RoundedCornerShape(24.dp)
 
 /** The message bar's height, and the size of its round buttons. */
 private val COMPOSER_HEIGHT = 48.dp
+
+/**
+ * The mode each user message was sent in: Cloud as stored ([MessageEntity.cloud]); Auto when the
+ * reply to it says where it ran ([MessageEntity.route], set only in Auto chats); else Local.
+ */
+internal fun modesSentIn(messages: List<MessageEntity>): Map<Long, ChatMode> {
+    val modes = mutableMapOf<Long, ChatMode>()
+    var asker: MessageEntity? = null
+    for (message in messages) {
+        when (message.role) {
+            Role.USER -> {
+                asker = message
+                modes[message.id] = if (message.cloud) ChatMode.CLOUD else ChatMode.LOCAL
+            }
+            Role.ASSISTANT -> asker?.let { user ->
+                if (!user.cloud && message.route != null) modes[user.id] = ChatMode.AUTO
+                asker = null
+            }
+            Role.TOOL -> Unit
+        }
+    }
+    return modes
+}

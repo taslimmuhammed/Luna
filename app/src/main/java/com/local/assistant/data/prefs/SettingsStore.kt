@@ -70,8 +70,45 @@ class SettingsStore(context: Context) {
 
     /** New chats start in Cloud mode. Off by default: every chat starts on the phone. */
     var newChatsCloud: Boolean
-        get() = prefs.getBoolean(KEY_NEW_CHATS_CLOUD, false)
-        set(value) = prefs.edit { putBoolean(KEY_NEW_CHATS_CLOUD, value) }
+        get() = newChatsMode == com.local.assistant.hybrid.ChatMode.CLOUD
+        set(value) {
+            newChatsMode = if (value) com.local.assistant.hybrid.ChatMode.CLOUD else com.local.assistant.hybrid.ChatMode.AUTO
+        }
+
+    /**
+     * The mode a new chat starts in. Auto unless chosen otherwise (or Cloud chosen before Auto
+     * existed); a chat starts Local all the same until the user has agreed to Auto
+     * ([autoConsented]) or Cloud ([cloudConsented]).
+     */
+    var newChatsMode: com.local.assistant.hybrid.ChatMode
+        get() = com.local.assistant.hybrid.ChatMode.of(prefs.getString(KEY_NEW_CHATS_MODE, null))
+            ?: if (prefs.getBoolean(KEY_NEW_CHATS_CLOUD, false)) com.local.assistant.hybrid.ChatMode.CLOUD else com.local.assistant.hybrid.ChatMode.AUTO
+        set(value) = prefs.edit { putString(KEY_NEW_CHATS_MODE, value.key) }
+
+    /**
+     * The user has read what Auto mode may send (questions Luna writes, with what's private
+     * hidden) and agreed to it, once: until then an Auto chat waits on the explainer.
+     */
+    var autoConsented: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_CONSENTED, false)
+        set(value) = prefs.edit { putBoolean(KEY_AUTO_CONSENTED, value) }
+
+    /** How many questions Auto chats sent Gemini on [day] (an ISO date), for the daily allowance. */
+    fun cloudAsks(day: String): Int =
+        if (prefs.getString(KEY_CLOUD_ASKS_DAY, null) == day) prefs.getInt(KEY_CLOUD_ASKS, 0) else 0
+
+    /** One more question sent on [day]; returns how many that makes. */
+    @Synchronized
+    fun countCloudAsk(day: String): Int {
+        val count = cloudAsks(day) + 1
+        prefs.edit {
+            putString(KEY_CLOUD_ASKS_DAY, day)
+            putInt(KEY_CLOUD_ASKS, count)
+        }
+        return count
+    }
+
+    fun observeCloudAsks(day: () -> String): Flow<Int> = observeKey(KEY_CLOUD_ASKS) { cloudAsks(day()) }
 
     /** Web search has been offered once, after the profile (a key saved, or skipped). */
     var webSearchAsked: Boolean
@@ -360,6 +397,10 @@ class SettingsStore(context: Context) {
         private const val KEY_WAKE_WORD = "wake_word"
         private const val KEY_CLOUD_CONSENTED = "cloud_consented"
         private const val KEY_NEW_CHATS_CLOUD = "new_chats_cloud"
+        private const val KEY_NEW_CHATS_MODE = "new_chats_mode"
+        private const val KEY_AUTO_CONSENTED = "auto_consented"
+        private const val KEY_CLOUD_ASKS_DAY = "cloud_asks_day"
+        private const val KEY_CLOUD_ASKS = "cloud_asks"
         private const val KEY_ASSISTANT_VOICE = "assistant_voice"
         private const val KEY_SPEECH_RATE = "speech_rate"
         private const val KEY_NATURAL_VOICE = "natural_voice"

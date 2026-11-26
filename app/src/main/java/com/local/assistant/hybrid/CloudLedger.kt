@@ -41,6 +41,8 @@ class CloudLedger(private val file: File) {
         TOOL_RESULTS("tool_results", "Tool results"),
         TASK("task", "Background task"),
         SEARCH("search", "Web search"),
+        /** An Auto chat's question, written by Luna, private details hidden ([Veil]). */
+        ASK("ask", "Question from Luna"),
         ;
 
         companion object {

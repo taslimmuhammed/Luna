@@ -41,6 +41,8 @@ object Instructions {
         inbox: Boolean = false,
         /** A Cloud chat's: [CLOUD_ROLE], and its tools' rules ([ToolCatalog.cloudRules]). */
         cloud: Boolean = false,
+        /** An Auto chat's: ask_gemini's rule among the tools' ([com.local.assistant.hybrid.ChatMode.AUTO]). */
+        ask: Boolean = false,
     ): String = buildString {
         if (cloud) {
             // The default persona says it runs on the device, which here it doesn't.
@@ -53,7 +55,7 @@ object Instructions {
         append(MEMORY_RULES)
         if (withTools) {
             append("\n\n")
-            append(if (cloud) ToolCatalog.cloudRules(webSearch) else ToolCatalog.rules(webSearch, photoSearch, healthData, fileSearch, inbox))
+            append(if (cloud) ToolCatalog.cloudRules(webSearch) else ToolCatalog.rules(webSearch, photoSearch, healthData, fileSearch, inbox, ask))
         }
     }
 

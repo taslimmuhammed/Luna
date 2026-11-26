@@ -10,6 +10,8 @@ import com.local.assistant.llm.ToolCall
 object ToolSteps {
 
     const val THINKING = "Thinking…"
+    /** An Auto chat's question on its way to Gemini, with what's private hidden first. */
+    const val ASKING_GEMINI = "Asking Gemini…"
     const val CHECKING_MEMORY = "Checking your memories…"
     const val READING_CONVERSATION = "Reading the conversation…"
 
@@ -41,6 +43,7 @@ object ToolSteps {
         ToolCatalog.CHECK_INBOX -> "Checking your messages…"
         ToolCatalog.SEARCH_MEMORY -> "Searching your memories…"
         ToolCatalog.WEB_SEARCH -> "Searching the web…"
+        ToolCatalog.ASK_GEMINI -> ASKING_GEMINI
         ToolCatalog.GET_UPCOMING -> "Checking what's coming up…"
         ToolCatalog.ADD_TASK -> "Setting a reminder…"
         ToolCatalog.UPDATE_TASK -> "Updating the reminder…"
@@ -94,6 +97,7 @@ object ToolSteps {
             ToolCatalog.GET_UPCOMING -> "Agenda read"
             ToolCatalog.SEARCH_MEMORY -> "Memories searched"
             ToolCatalog.WEB_SEARCH -> "Web searched"
+            ToolCatalog.ASK_GEMINI -> "Gemini asked"
             ToolCatalog.FIND_PHOTOS -> "Photos searched"
             ToolCatalog.READ_FILE -> "Files searched"
             ToolCatalog.CHECK_INBOX -> "Messages checked"

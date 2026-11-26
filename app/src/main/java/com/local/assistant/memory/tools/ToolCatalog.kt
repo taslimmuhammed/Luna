@@ -48,6 +48,13 @@ object ToolCatalog {
     const val CHECK_INBOX = "check_inbox"
 
     /**
+     * Gemini in the cloud, asked by the phone's model in an Auto chat
+     * ([com.local.assistant.hybrid.AskTools]) with a question it writes, private details hidden.
+     * Not "ask_cloud" or "web_*": beside web_lookup the names could blend.
+     */
+    const val ASK_GEMINI = "ask_gemini"
+
+    /**
      * Not a tool the model calls: the TOOL row that keeps the photos shown under a reply because
      * the message itself was searched for (`gallery/PhotoRecall`), so the chat draws them as it
      * draws find_photos'. Left out of what a turn is judged by (`ChunkPolicy.isUtility`).
@@ -77,7 +84,7 @@ object ToolCatalog {
      * don't go under such an answer. "Do you have any latest messages" got a card of chat
      * screenshots after check_inbox's answer, twice in one day (14 Nov 2026).
      */
-    val ANSWERS_FROM_ELSEWHERE = setOf(CHECK_INBOX, READ_FILE)
+    val ANSWERS_FROM_ELSEWHERE = setOf(CHECK_INBOX, READ_FILE, ASK_GEMINI)
 
     /** Tools that carry words a lookup's answer could go into: a reminder's title, a message. */
     val TAKES_ANSWERS = setOf(ADD_TASK, ADD_EVENT, SEND_MESSAGE, SAVE_FACT, EDIT_NOTE)
@@ -94,7 +101,7 @@ object ToolCatalog {
     val LOCKED = setOf(ADD_TASK, ADD_EVENT, SET_ALARM, SET_TIMER, PHONE_SETTING, CALCULATE, WEB_SEARCH)
 
     /** Tools that don't touch memory, run outside its transaction: they wait on apps, dialogs, the network or the photo model. */
-    val OUTSIDE_MEMORY = DEVICE + WEB_SEARCH + FIND_PHOTOS + HEALTH + READ_FILE + CHECK_INBOX
+    val OUTSIDE_MEMORY = DEVICE + WEB_SEARCH + FIND_PHOTOS + HEALTH + READ_FILE + CHECK_INBOX + ASK_GEMINI
 
     /**
      * Every tool the model is given; web search only once the user has set it up, photo search
@@ -102,13 +109,14 @@ object ToolCatalog {
      * phone with Health Connect (asking for access the first time it's used), files only with
      * All files access, and messages only while they are kept (Settings › Messages).
      */
-    fun declarations(web: Boolean, photos: Boolean = false, health: Boolean = false, files: Boolean = false, inbox: Boolean = false): List<String> =
+    fun declarations(web: Boolean, photos: Boolean = false, health: Boolean = false, files: Boolean = false, inbox: Boolean = false, ask: Boolean = false): List<String> =
         declarations + listOfNotNull(
             WEB_DECLARATION.takeIf { web },
             PHOTOS_DECLARATION.takeIf { photos },
             HEALTH_DECLARATION.takeIf { health },
             FILES_DECLARATION.takeIf { files },
             INBOX_DECLARATION.takeIf { inbox },
+            ASK_DECLARATION.takeIf { ask },
         )
 
     /**
@@ -127,13 +135,27 @@ object ToolCatalog {
     fun cloudRules(web: Boolean): String = CLOUD_RULES.replace(WEB_SLOT, if (web) WEB_RULE + "\n" else "")
 
     /** How to use the tools, appended to the instructions (section A) when tools are declared. */
-    fun rules(web: Boolean, photos: Boolean = false, health: Boolean = false, files: Boolean = false, inbox: Boolean = false): String = RULES
+    fun rules(web: Boolean, photos: Boolean = false, health: Boolean = false, files: Boolean = false, inbox: Boolean = false, ask: Boolean = false): String = RULES
+        .replace(ASK_SLOT, if (ask) ASK_RULE + "\n" else "")
         .replace(WEB_SLOT, if (web) WEB_RULE + "\n" else "")
         .replace(PHOTOS_SLOT, if (photos) PHOTOS_RULE + "\n" else "")
         .replace(HEALTH_SLOT, if (health) HEALTH_RULE + (if (web) HEALTH_OFFLINE else "") + "\n" else "")
         .replace(FILES_SLOT, if (files) FILES_RULE + "\n" else "")
         .replace(INBOX_SLOT, if (inbox) INBOX_RULE + "\n" else "")
         .replace(INBOX_CANT_SLOT, if (inbox) "" else INBOX_CANT)
+
+    private val ASK_DECLARATION = function(
+        ASK_GEMINI,
+        "Ask Gemini, a larger model in the cloud, for what you would do poorly on the phone: long writing (emails, essays, posts, stories, wishes), code, translation, planning, comparing, or a detailed explanation. question: one question that stands on its own. You decide what Gemini is told: everything the answer needs from this chat, and nothing it doesn't. A name goes in only when the answer uses it (a wish for Priya); never phone numbers, addresses, ID numbers, or a message or file copied out. about_user: only what you know of the user that this answer needs (vegetarian, budget about 1500 rupees, lives in Kochi). web: true when it needs news or other things that change. The app shows Gemini's answer as your reply.",
+        required = listOf("question"),
+        "question" to "string",
+        "about_user" to "string",
+        "web" to "boolean",
+    )
+
+    private const val ASK_RULE =
+        "- Long writing, code, translation, planning, comparing or a detailed explanation → ask_gemini, with a question that stands on its own and only what the answer needs: no phone numbers, addresses or ID numbers. Its answer is shown as your reply, so write nothing after it. The user's own things (reminders, alarms, calls, messages, photos, files, health, notes) stay with the other tools, and small talk and quick answers you're sure of are yours."
+    private const val ASK_SLOT = "{ask}\n"
 
     private val FILES_DECLARATION = function(
         READ_FILE,
@@ -354,6 +376,7 @@ object ToolCatalog {
         - Appointments, meetings, birthdays, trips → add_event.
         - Lasting facts about the user or their people and places → save_fact. How they want you to reply from now on ("keep answers short", "reply in Hindi") → save_fact with core=true, then follow it. Never for questions, hypotheticals, wishes, other people's opinions, passing moods or jokes.
         - "What's coming up" beyond the agenda → get_upcoming. Something told before that is not above → search_memory. "Forget …" → forget.
+        {ask}
         {web}
         {photos}
         {health}

@@ -36,6 +36,11 @@ val appCheckDebugToken: String = rootProject.file("local.properties").takeIf { i
  */
 val demo = providers.gradleProperty("demo").isPresent
 
+// -Pnpu: a debug build that carries Google's Qualcomm NPU dispatch library and Qualcomm's QNN
+// runtime, extracted on install (the NPU's DSP loads its part from a real file), for the engine
+// bench (debug EngineBench). Not in normal builds: the QNN runtime adds ~60 MB.
+val npu = providers.gradleProperty("npu").isPresent
+
 /**
  * The upload key Play checks each bundle against, read from `keystore.properties` at the project
  * root: storeFile, storePassword, keyAlias, keyPassword (see keystore.properties.example). The
@@ -194,7 +199,7 @@ android {
     packaging {
         // Compressed in the demo APK (22 MB of LiteRT-LM smaller in the repository); extracted
         // at install. Otherwise stored as usual, uncompressed and loaded in place.
-        jniLibs.useLegacyPackaging = demo
+        jniLibs.useLegacyPackaging = demo || npu
         resources.excludes += setOf(
             "/META-INF/{AL2.0,LGPL2.1}",
             "/META-INF/DEPENDENCIES",
@@ -282,6 +287,13 @@ dependencies {
 
     // On-device LLM runtime.
     implementation(libs.litertlm.android)
+    if (npu) {
+        // 2.4.0, not 2.3.2: LiteRT-LM 0.19.1 looks for the versioned plugin and dispatch
+        // interfaces (LiteRtCompilerPluginQueryInterface), which 2.3.2's libraries don't export.
+        // QAIRT 2.52 is what LiteRT 2.4.0 is built against (its third_party/qairt).
+        debugImplementation("com.google.ai.edge.litert:litert-npu-runtime-qualcomm:2.4.0")
+        debugImplementation("com.qualcomm.qti:qnn-runtime:2.52.0")
+    }
     // TensorFlow Lite's interpreter, for the two small face models (gallery/faces): 5.6 MB of
     // native code, against about 34 MB for ONNX Runtime or OpenCV.
     implementation(libs.litert)

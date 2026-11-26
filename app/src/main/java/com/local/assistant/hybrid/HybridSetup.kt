@@ -99,6 +99,13 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
     val cloudModel: String
         get() = config(KEY_CLOUD_MODEL, DEFAULT_CLOUD_MODEL)
 
+    /**
+     * How many questions Auto chats may send Gemini a day ([AutoRouter]): past it, they answer on
+     * the phone. Remote Config's, so it can be raised for a demo without a new APK.
+     */
+    val autoDailyAsks: Int
+        get() = config(KEY_AUTO_DAILY_ASKS, DEFAULT_AUTO_DAILY_ASKS.toString()).toIntOrNull()?.coerceAtLeast(0) ?: DEFAULT_AUTO_DAILY_ASKS
+
     /** The smaller Gemini for one-shot work in the cloud (reading a document sent in a Cloud chat). */
     val liteModel: String
         get() = config(KEY_LITE_MODEL, DEFAULT_LITE_MODEL)
@@ -190,8 +197,15 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
         const val KEY_CLOUD_MODEL = "cloud_model"
         const val KEY_LITE_MODEL = "lite_model"
         const val KEY_NANO_OPTION = "nano_model_option"
+        const val KEY_AUTO_DAILY_ASKS = "auto_daily_asks"
+        const val DEFAULT_AUTO_DAILY_ASKS = 40
 
-        const val DEFAULT_CLOUD_MODEL = "gemini-3.8-flash"
+        /**
+         * The lighter model for everything in the cloud for now: the user asked on 26 Nov 2026,
+         * gemini-3.8-flash spending too many tokens. Remote Config's `cloud_model` still wins when
+         * set, to go back without a new APK.
+         */
+        const val DEFAULT_CLOUD_MODEL = "gemini-3.5-flash-lite"
         const val DEFAULT_LITE_MODEL = "gemini-3.5-flash-lite"
 
         /** What Nano may write in one go. */
@@ -202,6 +216,7 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
             KEY_CLOUD_MODEL to DEFAULT_CLOUD_MODEL,
             KEY_LITE_MODEL to DEFAULT_LITE_MODEL,
             KEY_NANO_OPTION to "stable",
+            KEY_AUTO_DAILY_ASKS to DEFAULT_AUTO_DAILY_ASKS.toString(),
         )
     }
 }

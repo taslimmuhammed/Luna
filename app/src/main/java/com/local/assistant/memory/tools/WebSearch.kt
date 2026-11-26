@@ -29,6 +29,9 @@ class WebSearchError(message: String, val keyRefused: Boolean = false) : Excepti
  */
 class WebTools(private val web: WebSearch) {
 
+    /** A search is set up (the user's key, or Gemini's Google Search where that's the provider). */
+    val enabled: Boolean get() = web.enabled
+
     internal suspend fun search(args: Args): ActionResult {
         val query = args.required("query").take(MAX_QUERY)
         val news = args.text("topic")?.lowercase(Locale.ROOT)?.contains("news") == true

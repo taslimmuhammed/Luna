@@ -64,9 +64,17 @@ fun MessageRow(
     onReport: ((MessageEntity) -> Unit)? = null,
     /** Says under each message where it went and which model answered (a chat that has used Cloud). */
     showWhere: Boolean = false,
+    /** The mode a user message was sent in; an Auto one says where it ran under the reply instead. */
+    sentIn: com.local.assistant.hybrid.ChatMode? = null,
+    /** Opens what an Auto reply's question to Gemini sent, from its route line. */
+    onOpenRoute: (() -> Unit)? = null,
 ) {
     when (message.role) {
-        Role.USER -> UserMessage(message, modifier, mark = message.cloud.takeIf { showWhere })
+        Role.USER -> UserMessage(
+            message,
+            modifier,
+            mark = message.cloud.takeIf { showWhere && sentIn != com.local.assistant.hybrid.ChatMode.AUTO },
+        )
         Role.ASSISTANT -> AssistantMessage(
             text = message.text,
             incomplete = message.incomplete,
@@ -76,6 +84,8 @@ fun MessageRow(
             onReadAloud = onReadAloud?.let { read -> { read(message) } },
             onReport = onReport?.let { report -> { report(message) } },
             servedBy = com.local.assistant.hybrid.ServedBy.of(message.servedBy)?.takeIf { showWhere || !it.onDevice },
+            route = com.local.assistant.hybrid.RouteReason.of(message.route),
+            onOpenRoute = onOpenRoute,
             modifier = modifier,
         )
         // Tool calls are bookkeeping, not conversation.
@@ -158,6 +168,9 @@ fun AssistantMessage(
     onReport: (() -> Unit)? = null,
     /** Which model wrote it, said under it ([ServedByBadge]). */
     servedBy: com.local.assistant.hybrid.ServedBy? = null,
+    /** An Auto reply: where it ran and why, said instead ([RouteBadge]). */
+    route: com.local.assistant.hybrid.RouteReason? = null,
+    onOpenRoute: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
@@ -167,7 +180,11 @@ fun AssistantMessage(
         }
         if (shown.hidden && !streaming) HiddenDetails(Modifier.padding(top = 2.dp))
 
-        if (servedBy != null && !streaming) ServedByBadge(servedBy, Modifier.padding(top = 4.dp))
+        if (route != null && !streaming) {
+            RouteBadge(route, servedBy, Modifier.padding(top = 4.dp), onOpen = onOpenRoute)
+        } else if (servedBy != null && !streaming) {
+            ServedByBadge(servedBy, Modifier.padding(top = 4.dp))
+        }
         val footnote = listOfNotNull(
             "Stopped".takeIf { incomplete },
             tokensPerSecond?.let { "%.1f tok/s".format(it) },

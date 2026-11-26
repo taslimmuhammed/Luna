@@ -3,6 +3,7 @@ package com.local.assistant.debug
 import android.os.SystemClock
 import com.local.assistant.AppContainer
 import com.local.assistant.chat.ChatSender
+import com.local.assistant.hybrid.ChatMode
 import com.local.assistant.memory.tools.MemoryChip
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
@@ -13,13 +14,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Debug builds only: one Cloud message through the app's own send path ([ChatSender]), in a
  * hidden chat, with each step and the reply timed. For "Cloud mode thinks and never answers".
  *
- *   adb shell "am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode cloud [--es text '…'] [--el chat N]"
+ *   adb shell "am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode cloud [--es text '…'] [--el chat N] [--es chatmode auto]"
+ *
+ * `--es chatmode auto`: the message goes as in an Auto chat, and what it asked Gemini is logged.
  */
 class CloudProbe(private val container: AppContainer, private val log: (String) -> Unit) {
 
-    suspend fun run(text: String, chatId: Long? = null) = coroutineScope {
+    suspend fun run(text: String, chatId: Long? = null, mode: ChatMode = ChatMode.CLOUD) = coroutineScope {
         val setup = container.hybridSetup
-        log("# Cloud probe, ${java.util.Date()}")
+        log("# Cloud probe (${mode.key}), ${java.util.Date()}")
         log("- configured: ${setup.configured}, available: ${setup.cloudAvailable}, model: ${setup.cloudModel}, lite: ${setup.liteModel}")
         val started = SystemClock.elapsedRealtime()
         fun at() = "${SystemClock.elapsedRealtime() - started} ms"
@@ -40,13 +43,19 @@ class CloudProbe(private val container: AppContainer, private val log: (String) 
             listener = object : ChatSender.Listener {
                 override fun onChatCreated(chatId: Long) = log("  ${at()}: chat $chatId created")
                 override fun onUserMessageStored(messageId: Long) = log("  ${at()}: message $messageId stored")
-                override fun onMemory(chip: MemoryChip) = log("  ${at()}: chip ${chip.kind} ${chip.label}")
+                override fun onMemory(chip: MemoryChip) {
+                    log("  ${at()}: chip ${chip.kind} ${chip.label}")
+                    chip.ask?.let { ask ->
+                        log("    asked Gemini: ${ask.sent.replace("\n", " ")}")
+                        ask.aboutUser?.let { log("    about the user: $it") }
+                    }
+                }
                 override fun onFinished(reply: String, failure: String?) {
                     finished.complete(reply to failure)
                 }
             },
             hidden = true,
-            toCloud = true,
+            mode = mode,
         )
         log("- sent: $sent")
         val result = withTimeoutOrNull(TIMEOUT_MS) { finished.await() }

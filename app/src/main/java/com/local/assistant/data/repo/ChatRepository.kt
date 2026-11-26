@@ -46,16 +46,26 @@ class ChatRepository(
      * [hidden]: the assistant overlay's, kept out of the chat list (see [ChatEntity.hidden]).
      * [cloud]: where the chat's first message goes ([ChatEntity.cloud]).
      */
-    suspend fun createChat(title: String = DEFAULT_TITLE, hidden: Boolean = false, cloud: Boolean = false): Long {
+    suspend fun createChat(
+        title: String = DEFAULT_TITLE,
+        hidden: Boolean = false,
+        cloud: Boolean = false,
+        /** An Auto chat ([com.local.assistant.hybrid.ChatMode.AUTO]); never with [cloud]. */
+        auto: Boolean = false,
+    ): Long {
         val now = System.currentTimeMillis()
-        return dao.insertChat(ChatEntity(title = title, createdAt = now, updatedAt = now, hidden = hidden, cloud = cloud))
+        return dao.insertChat(ChatEntity(title = title, createdAt = now, updatedAt = now, hidden = hidden, cloud = cloud, auto = auto && !cloud))
     }
 
     /**
      * Where the chat's next message goes. Only ever the next: every message keeps the mode it was
      * sent in ([MessageEntity.cloud]), so switching never changes what was already said where.
      */
-    suspend fun setChatCloud(chatId: Long, cloud: Boolean) = dao.setCloud(chatId, cloud)
+    suspend fun setChatCloud(chatId: Long, cloud: Boolean) = dao.setMode(chatId, cloud = cloud, auto = false)
+
+    /** Where the chat's next message goes, Auto included; as [setChatCloud], only ever the next. */
+    suspend fun setChatMode(chatId: Long, mode: com.local.assistant.hybrid.ChatMode) =
+        dao.setMode(chatId, cloud = mode == com.local.assistant.hybrid.ChatMode.CLOUD, auto = mode == com.local.assistant.hybrid.ChatMode.AUTO)
 
     /** Every message the cloud model was sent, newest first. */
     fun observeCloudMessages(limit: Int = 300): Flow<List<MessageEntity>> = dao.observeCloudMessages(limit)
@@ -83,6 +93,8 @@ class ChatRepository(
         cloud: Boolean = false,
         /** Which model wrote it, for a reply ([com.local.assistant.hybrid.ServedBy.key]). */
         servedBy: String? = null,
+        /** In an Auto chat, why the reply came from where it did ([com.local.assistant.hybrid.RouteReason.key]). */
+        route: String? = null,
     ): Long {
         val now = System.currentTimeMillis()
         return dao.appendMessage(
@@ -102,6 +114,7 @@ class ChatRepository(
                 offRecord = memoryPaused(),
                 cloud = cloud,
                 servedBy = servedBy,
+                route = route,
             ),
         )
     }

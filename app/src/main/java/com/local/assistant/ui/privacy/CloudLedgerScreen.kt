@@ -16,11 +16,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -47,11 +49,13 @@ import com.local.assistant.memory.db.AgendaDao
 import com.local.assistant.memory.db.FactDao
 import com.local.assistant.memory.db.UserNoteDao
 import com.local.assistant.ui.chat.CloudColors
+import com.local.assistant.ui.chat.highlightPlaceholders
 import com.local.assistant.ui.theme.AppColors
 import com.local.assistant.ui.theme.GlassCard
 import com.local.assistant.ui.theme.GlassIconButton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -70,6 +74,9 @@ class CloudControls(
     private val notes: UserNoteDao,
     /** Something Cloud chats could see is now Local only: their prefix changes. */
     private val onChanged: () -> Unit,
+    /** Questions Auto chats sent Gemini today, and how many they may a day. */
+    val asksToday: Flow<Int> = flowOf(0),
+    val asksPerDay: () -> Int = { 0 },
 ) {
     /** One thing a Cloud chat can recall, with how to take it back. */
     data class Learned(val kind: String, val text: String, val keepLocal: suspend () -> Unit)
@@ -112,6 +119,7 @@ fun CloudLedgerScreen(controls: CloudControls, onBack: () -> Unit) {
     val local by controls.localMessages.collectAsStateWithLifecycle(initialValue = 0)
     val cloud by controls.cloudMessages.collectAsStateWithLifecycle(initialValue = 0)
     val learned by controls.learned.collectAsStateWithLifecycle(initialValue = emptyList())
+    val asksToday by controls.asksToday.collectAsStateWithLifecycle(initialValue = 0)
     var clearing by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -140,8 +148,30 @@ fun CloudLedgerScreen(controls: CloudControls, onBack: () -> Unit) {
                     Count(Modifier.weight(1f), local, "stayed on this phone", Icons.Outlined.Lock, CloudColors.Local)
                     Count(Modifier.weight(1f), cloud, "sent to Gemini", Icons.Outlined.Cloud, CloudColors.Cloud)
                 }
+                val perDay = controls.asksPerDay()
+                if (perDay > 0) {
+                    GlassCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), padding = 14.dp) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = CloudColors.Auto, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Gemini today: $asksToday of $perDay", style = MaterialTheme.typography.titleSmall, color = CloudColors.Auto, modifier = Modifier.weight(1f))
+                        }
+                        LinearProgressIndicator(
+                            progress = { (asksToday.toFloat() / perDay).coerceIn(0f, 1f) },
+                            color = CloudColors.Auto,
+                            trackColor = CloudColors.AutoSoft,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                        )
+                        Text(
+                            "Questions Auto chats asked Gemini. Past the day's allowance, Auto answers on this phone.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.TextSecondary,
+                        )
+                    }
+                }
                 Text(
                     "Local chats, and everything learned from them, never leave this phone: Cloud chats are built without them. " +
+                        "Auto chats send only the questions Luna writes. " +
                         "Below is everything Cloud chats can recall, and every request that went out, word for word.",
                     style = MaterialTheme.typography.bodySmall,
                     color = AppColors.TextSecondary,
@@ -219,12 +249,13 @@ private fun Quiet(text: String) {
 @Composable
 private fun EntryCard(entry: CloudLedger.Entry) {
     var open by remember { mutableStateOf(false) }
+    val ask = entry.kind == CloudLedger.Kind.ASK.key
     GlassCard(Modifier.padding(horizontal = 16.dp).clickable { open = !open }, padding = 12.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 CloudLedger.Kind.of(entry.kind)?.label ?: entry.kind,
                 style = MaterialTheme.typography.labelLarge,
-                color = CloudColors.Cloud,
+                color = if (ask) CloudColors.Auto else CloudColors.Cloud,
                 modifier = Modifier.weight(1f),
             )
             Text(TIME.format(Instant.ofEpochMilli(entry.at).atZone(ZoneId.systemDefault())), style = MaterialTheme.typography.labelSmall, color = AppColors.TextSecondary)
@@ -236,8 +267,9 @@ private fun EntryCard(entry: CloudLedger.Entry) {
         )
         Spacer(Modifier.size(4.dp))
         SelectionContainer {
+            val text = if (open) entry.text else entry.text.take(PREVIEW_CHARS) + if (entry.text.length > PREVIEW_CHARS) "…" else ""
             Text(
-                if (open) entry.text else entry.text.take(PREVIEW_CHARS) + if (entry.text.length > PREVIEW_CHARS) "…" else "",
+                if (ask) highlightPlaceholders(text) else androidx.compose.ui.text.AnnotatedString(text),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = AppColors.TextPrimary,
             )

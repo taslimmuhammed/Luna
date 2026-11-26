@@ -88,6 +88,10 @@ class ToolExecutor(
     private val files: com.local.assistant.files.FileTools? = null,
     /** check_inbox: messages that came to the phone; null when not wired in. */
     private val inbox: com.local.assistant.inbox.InboxTools? = null,
+    /** ask_gemini, for Auto chats ([ToolContext.auto]); null when the build has no cloud. Read when called: it's made after this. */
+    private val ask: () -> com.local.assistant.hybrid.AskTools? = { null },
+    /** web_lookup in an Auto chat: Google Search through Gemini, its query hidden by [ask]; null for [web]'s. */
+    private val autoWeb: () -> WebTools? = { null },
     /**
      * Whether this executor may run a call at all. A Cloud chat's allows only what
      * [com.local.assistant.hybrid.CloudScope.allows] does: whatever the model asks for, a call
@@ -223,6 +227,8 @@ class ToolExecutor(
                 call.name == ToolCatalog.EDIT_NOTE && key == "note" -> value
                 // A file's name as the earlier result listed it ("Invoice_10234"), not the user's numbers.
                 call.name == ToolCatalog.READ_FILE && key == "name" -> value
+                // Luna's own question for Gemini: its numbers may be a message's or a file's.
+                call.name == ToolCatalog.ASK_GEMINI -> value
                 // Who to call or message: a name spelled as the user spelled it.
                 call.name == ToolCatalog.CALL && key == "who" || call.name == ToolCatalog.SEND_MESSAGE && key == "to" ->
                     ContactMatcher.asSaid(NumberGrounding.ground(value, userText), userText)
@@ -240,8 +246,31 @@ class ToolExecutor(
             if (health?.inQuery(args.text("query").orEmpty()) == true) {
                 throw ToolError("That search has the user's health readings in it, and those stay on this phone. Search without their numbers (\"normal resting heart rate\"), or answer from what you know.")
             }
+            val auto = context.auto
+            val ask = ask()
+            val autoWeb = autoWeb()
+            if (auto != null && autoWeb != null && ask != null && web?.enabled != true) {
+                // An Auto chat with no search of the user's own: Google's, through Gemini, with any
+                // ID or card number taken out of the query first.
+                if (auto.lane == com.local.assistant.hybrid.AutoRouter.Lane.LOCAL_ONLY) {
+                    throw ToolError("Nothing can go online from this message (${auto.reason?.label?.substringAfter("· ") ?: "it stays on the phone"}). Answer from what you know, and say it may be out of date.")
+                }
+                val query = ask.withhold(args.required("query"))
+                val done = autoWeb.search(Args(call.arguments + ("query" to query)))
+                return Applied(done.result, done.chip)
+            }
             val done = (web ?: throw ToolError("Web search isn't set up.")).search(args)
             return Applied(done.result, done.chip)
+        }
+        if (call.name == ToolCatalog.ASK_GEMINI) {
+            val tools = ask()?.takeIf { context.auto != null } ?: throw ToolError("There is no tool called ${call.name}.")
+            val question = args.required("question")
+            // As for a web search: readings just read out would go with it.
+            if (health?.inQuery(question) == true || health?.inQuery(args.text("about_user").orEmpty()) == true) {
+                throw ToolError("That question has the user's health readings in it, and those stay on this phone. Ask without their numbers, or answer yourself.")
+            }
+            val done = tools.ask(question, args.text("about_user"), args.bool("web") == true, context)
+            return Applied(done.result, done.chip, reply = done.reply)
         }
         if (call.name == ToolCatalog.HEALTH) {
             val done = (health ?: throw ToolError("Health data isn't available in this app.")).read(args.text("metric"), args.text("when"))

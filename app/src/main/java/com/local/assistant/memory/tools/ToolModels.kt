@@ -38,8 +38,38 @@ data class MemoryChip(
     val noteId: Long? = null,
     /** read_file: the files or folders it found, drawn as rows that open them. */
     val files: FileSet? = null,
+    /** ask_gemini: what went to Gemini, what was hidden, for "What Gemini saw". */
+    val ask: AskView? = null,
 ) {
-    enum class Kind { FACT, TASK, EVENT, FORGET, ALARM, IMAGE, CALL, MESSAGE, TIMER, APP, SETTING, WEB, PHOTOS, SCREENSHOT, HEALTH, NOTE, FILES }
+    enum class Kind { FACT, TASK, EVENT, FORGET, ALARM, IMAGE, CALL, MESSAGE, TIMER, APP, SETTING, WEB, PHOTOS, SCREENSHOT, HEALTH, NOTE, FILES, ASK }
+}
+
+/**
+ * An Auto chat's question to Gemini, as the user can check it: [asked], what Luna wrote, and
+ * [sent], what Gemini was given with private details hidden ([com.local.assistant.hybrid.Veil]).
+ * [answerSent] is Gemini's answer as it came, placeholders and all, and [mapping] what each
+ * placeholder stood for: both stay on the phone, for the chat's next question to Gemini.
+ * [outcome]: [OUTCOME_ANSWERED], [OUTCOME_KEPT] (the user kept it on the phone) or [OUTCOME_FAILED].
+ */
+data class AskView(
+    val asked: String,
+    val sent: String,
+    val aboutUser: String? = null,
+    val hidden: String? = null,
+    val model: String? = null,
+    val servedBy: String? = null,
+    /** Why Gemini was asked ([com.local.assistant.hybrid.RouteReason.key]). */
+    val reason: String? = null,
+    val web: Boolean = false,
+    val answerSent: String? = null,
+    val outcome: String = OUTCOME_ANSWERED,
+    val at: Long = 0L,
+) {
+    companion object {
+        const val OUTCOME_ANSWERED = "answered"
+        const val OUTCOME_KEPT = "kept"
+        const val OUTCOME_FAILED = "failed"
+    }
 }
 
 /** Files or folders on the phone that answer [query], best first; [read] is the one a reply was read from. */
@@ -150,6 +180,11 @@ data class ToolContext(
     val onStep: (String) -> Unit = {},
     /** A document attached to the message, which read_file reads when asked to ([ToolLoop.readAttached]). */
     val document: AttachedDocument? = null,
+    /**
+     * In an Auto chat, where its router sent this message ([com.local.assistant.hybrid.AutoRouter]):
+     * ask_gemini runs only with one, and only when its lane lets anything go. Null elsewhere.
+     */
+    val auto: com.local.assistant.hybrid.AutoRouter.Route? = null,
     /**
      * What the app read from [document] for the model to act on: the numbers in a call that came
      * from it are the document's, so they're checked against it as well as the user's words.

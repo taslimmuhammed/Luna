@@ -1,5 +1,8 @@
 package com.local.assistant.ui.chat
 
+import com.local.assistant.hybrid.AskConfirm
+import com.local.assistant.hybrid.ChatMode
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -80,17 +83,24 @@ class ChatViewModel(
     private val cloudAvailable: () -> Boolean = { false },
     /** A voice message started: whatever will hear it gets ready ([com.local.assistant.llm.NanoFirstBackend.warmEars]). */
     private val onRecordingStarted: () -> Unit = {},
+    /** The mode a new chat starts in, as it would now ([com.local.assistant.AppContainer.newChatsMode]). */
+    private val newChatsMode: () -> ChatMode = { ChatMode.LOCAL },
+    /** Auto's questions held for the user's say-so ([AskConfirm]); none without the cloud. */
+    private val askConfirm: AskConfirm? = null,
+    /** How many questions Auto chats may send Gemini a day. */
+    private val dailyAsks: () -> Int = { 0 },
 ) : ViewModel() {
 
-    private val _cloudMode = MutableStateFlow(false)
+    private val _mode = MutableStateFlow(ChatMode.LOCAL)
 
     /**
-     * Where the next message in the chat on screen goes: to Gemini (true) or only this phone's
-     * model. Each message keeps the mode it was sent in ([MessageEntity.cloud]).
+     * Where the next message in the chat on screen goes: only this phone's model, Auto (the
+     * phone's, asking Gemini with what's private hidden), or Gemini. Each message keeps the mode
+     * it was sent in ([MessageEntity.cloud], [MessageEntity.route]).
      */
-    val cloudMode: StateFlow<Boolean> = _cloudMode.asStateFlow()
+    val mode: StateFlow<ChatMode> = _mode.asStateFlow()
 
-    /** Whether the switch offers Cloud at all. */
+    /** Whether the switch offers Cloud and Auto at all. */
     val canUseCloud: Boolean get() = cloudAvailable()
 
     private val _askCloudConsent = MutableStateFlow(false)
@@ -98,25 +108,55 @@ class ChatViewModel(
     /** The first switch to Cloud waits on the user reading what it sends ([answerCloudConsent]). */
     val askCloudConsent: StateFlow<Boolean> = _askCloudConsent.asStateFlow()
 
+    private val _askAutoConsent = MutableStateFlow(false)
+
+    /** The first switch to Auto waits on the user reading what it may send ([answerAutoConsent]). */
+    val askAutoConsent: StateFlow<Boolean> = _askAutoConsent.asStateFlow()
+
+    /** An Auto question held for the user's say-so: shown with what would be sent. */
+    val pendingAsk: StateFlow<AskConfirm.Pending?> = askConfirm?.pending ?: MutableStateFlow(null)
+
+    /** Questions Auto chats sent Gemini today, of [dailyAsks]. */
+    val asksToday: StateFlow<Int> = settings.observeCloudAsks { java.time.LocalDate.now().toString() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    val asksPerDay: Int get() = dailyAsks()
+
     /**
-     * The switch: [on] sends this chat's next messages to Gemini, off keeps them on the phone. The
-     * first time, the explainer comes first and nothing changes until the user agrees.
+     * The switch. Cloud and Auto need the user to have read, once, what they send: until then
+     * the explainer comes first and nothing changes.
      */
-    fun setCloudMode(on: Boolean) {
-        if (on && !cloudAvailable()) return
-        if (on && !settings.cloudConsented) {
+    fun setMode(mode: ChatMode) {
+        if (mode.reachesCloud && !cloudAvailable()) return
+        if (mode == ChatMode.CLOUD && !settings.cloudConsented) {
             _askCloudConsent.value = true
             return
         }
-        _cloudMode.value = on
-        _activeChatId.value?.let { id -> viewModelScope.launch { repository.setChatCloud(id, on) } }
+        if (mode == ChatMode.AUTO && !settings.autoConsented) {
+            _askAutoConsent.value = true
+            return
+        }
+        _mode.value = mode
+        _activeChatId.value?.let { id -> viewModelScope.launch { repository.setChatMode(id, mode) } }
     }
 
     fun answerCloudConsent(agreed: Boolean) {
         _askCloudConsent.value = false
         if (!agreed) return
         settings.cloudConsented = true
-        setCloudMode(true)
+        setMode(ChatMode.CLOUD)
+    }
+
+    fun answerAutoConsent(agreed: Boolean) {
+        _askAutoConsent.value = false
+        if (!agreed) return
+        settings.autoConsented = true
+        setMode(ChatMode.AUTO)
+    }
+
+    /** The user's answer to a held question: send it to Gemini, or keep it on the phone. */
+    fun answerAsk(send: Boolean) {
+        askConfirm?.answer(send)
     }
 
     /** A tool waiting on the user's answer to a permission dialog, e.g. contacts for "call amma". */
@@ -231,7 +271,11 @@ class ChatViewModel(
         viewModelScope.launch {
             _activeChatId.collect { id ->
                 val available = cloudAvailable()
-                _cloudMode.value = available && if (id == null) settings.newChatsCloud && settings.cloudConsented else repository.chat(id)?.cloud == true
+                _mode.value = when {
+                    !available -> ChatMode.LOCAL
+                    id == null -> newChatsMode()
+                    else -> repository.chat(id)?.mode ?: ChatMode.LOCAL
+                }
             }
         }
 
@@ -469,7 +513,7 @@ class ChatViewModel(
             attachment = attachment?.let { ChatSender.Attachment(it.path, it.kind, it.durationMs) },
             owner = this,
             listener = listener,
-            toCloud = _cloudMode.value,
+            mode = _mode.value,
         )
         if (started) _pendingAttachment.value = null
     }
@@ -489,7 +533,7 @@ class ChatViewModel(
             attachment = ChatSender.Attachment(recording.file.absolutePath, AttachmentKind.AUDIO, recording.durationMs),
             owner = this,
             listener = listener,
-            toCloud = _cloudMode.value,
+            mode = _mode.value,
         )
         if (!started) {
             chunker = null
@@ -601,6 +645,9 @@ class ChatViewModel(
                     onPhoneKillsAnswered = container::toldAboutPhoneKills,
                     cloudAvailable = { container.hybridSetup.cloudAvailable },
                     onRecordingStarted = container.chatBackend::warmEars,
+                    newChatsMode = container::newChatsMode,
+                    askConfirm = container.askConfirm,
+                    dailyAsks = { container.hybridSetup.autoDailyAsks },
                 )
             }
         }

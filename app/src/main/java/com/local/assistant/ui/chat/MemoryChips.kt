@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.local.assistant.memory.db.TaskEntity
 import com.local.assistant.memory.db.UserNoteEntity
+import com.local.assistant.memory.tools.AskView
 import com.local.assistant.memory.tools.MemoryChip
 import com.local.assistant.ui.memory.PlacePreview
 import com.local.assistant.ui.notes.NotePreview
@@ -94,6 +95,8 @@ fun MemoryChips(
     onOpenNote: ((UserNoteEntity) -> Unit)? = null,
     /** Ticks or unticks a list's item: the note's id and the item's place in it. */
     onToggleNoteItem: (Long, Int) -> Unit = { _, _ -> },
+    /** Opens what an Auto chat's question to Gemini sent ([GeminiSawSheet]). */
+    onOpenAsk: ((AskView) -> Unit)? = null,
 ) {
     if (chips.isEmpty()) return
     var editing by remember { mutableStateOf<ChatViewModel.ChipItem?>(null) }
@@ -130,6 +133,7 @@ fun MemoryChips(
                 onEdit = { editing = item },
                 onOpenClock = onOpenClock,
                 onOpenLink = onOpenLink,
+                onOpenAsk = onOpenAsk,
             )
             if (reminder != null && place != null && onOpenReminder != null) {
                 PlacePreview(
@@ -173,6 +177,7 @@ private fun MemoryChipRow(
     onEdit: () -> Unit,
     onOpenClock: () -> Unit,
     onOpenLink: (String) -> Unit,
+    onOpenAsk: ((AskView) -> Unit)? = null,
 ) {
     val chip = item.chip
     val text = listOfNotNull(chip.label, chip.detail, chip.at?.let { formatWhen(it, chip.allDay) } ?: chip.place)
@@ -204,6 +209,10 @@ private fun MemoryChipRow(
             // A clock alarm or timer is the clock app's once set: that is where it is changed or stopped.
             if (chip.kind == MemoryChip.Kind.ALARM || chip.kind == MemoryChip.Kind.TIMER) ChipAction("Open clock", onOpenClock)
             chip.link?.let { link -> ChipAction("Open") { onOpenLink(link) } }
+            val ask = chip.ask
+            if (chip.kind == MemoryChip.Kind.ASK && ask != null && onOpenAsk != null) {
+                ChipAction(if (ask.outcome == AskView.OUTCOME_KEPT) "See it" else "See what was sent") { onOpenAsk(ask) }
+            }
         }
     }
 }

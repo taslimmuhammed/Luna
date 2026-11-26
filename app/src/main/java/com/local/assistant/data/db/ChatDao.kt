@@ -64,6 +64,10 @@ interface ChatDao {
     @Query("UPDATE chats SET cloud = :cloud WHERE id = :chatId")
     suspend fun setCloud(chatId: Long, cloud: Boolean)
 
+    /** Where [chatId]'s next message goes ([com.local.assistant.hybrid.ChatMode]): both flags at once. */
+    @Query("UPDATE chats SET cloud = :cloud, auto = :auto WHERE id = :chatId")
+    suspend fun setMode(chatId: Long, cloud: Boolean, auto: Boolean)
+
     /** Every message the cloud model was sent, newest first, for the screen that shows what it has seen. */
     @Query("SELECT * FROM messages WHERE cloud = 1 AND role != 'TOOL' ORDER BY id DESC LIMIT :limit")
     fun observeCloudMessages(limit: Int): Flow<List<MessageEntity>>

@@ -4,8 +4,15 @@ import android.util.Log
 import com.local.assistant.data.db.AttachmentKind
 import com.local.assistant.data.db.Role
 import com.local.assistant.data.repo.ChatRepository
+import com.local.assistant.hybrid.AutoRouter
+import com.local.assistant.hybrid.ChatMode
 import com.local.assistant.hybrid.FirebaseBackend
+import com.local.assistant.hybrid.RouteReason
 import com.local.assistant.hybrid.ServedBy
+import com.local.assistant.hybrid.Veil
+import com.local.assistant.memory.retrieval.QueryText
+import com.local.assistant.memory.tools.AskView
+import com.local.assistant.memory.tools.ToolCatalog
 import com.local.assistant.llm.LlmService
 import com.local.assistant.llm.ContextWindow
 import com.local.assistant.llm.PromptAttachment
@@ -45,7 +52,15 @@ class ChatSender(
     private val local: com.local.assistant.llm.NanoFirstBackend? = null,
     /** Cloud mode, where the build has it ([com.local.assistant.hybrid.CloudScope]). */
     private val cloud: Cloud? = null,
+    /** Auto mode, where the build has the cloud ([com.local.assistant.hybrid.ChatMode.AUTO]). */
+    private val auto: Auto? = null,
 ) {
+
+    /**
+     * What an Auto chat's router reads ([AutoRouter]): what the phone and the cloud allow now, and
+     * the people Luna knows by name (a message naming one is the phone's to word).
+     */
+    class Auto(val signals: () -> AutoRouter.Signals, val known: suspend () -> Veil.Known)
 
     /**
      * What a Cloud chat's turn runs on: its own [turns], built from sources that can only read
@@ -137,10 +152,13 @@ class ChatSender(
          * before stays where it was said. On the lock screen, always the phone.
          */
         toCloud: Boolean? = null,
+        /** As [toCloud], with Auto too; wins over it when given. */
+        mode: ChatMode? = null,
     ): Boolean {
         val prompt = text.trim()
         if ((prompt.isEmpty() && attachment == null) || isBusy) return false
-        return start(chatId, prompt, attachment, owner, listener, hidden, locked, storedUserMessageId = null, screen = screen, toCloud = toCloud)
+        val wanted = mode ?: toCloud?.let { if (it) ChatMode.CLOUD else ChatMode.LOCAL }
+        return start(chatId, prompt, attachment, owner, listener, hidden, locked, storedUserMessageId = null, screen = screen, mode = wanted)
     }
 
     /**
@@ -162,7 +180,7 @@ class ChatSender(
         locked: Boolean,
         storedUserMessageId: Long?,
         screen: String? = null,
-        toCloud: Boolean? = null,
+        mode: ChatMode? = null,
     ): Boolean {
         stopRequested = false
         cloudTurn = false
@@ -203,31 +221,44 @@ class ChatSender(
             // Settled once the chat is known: the message's own mode, stored with it.
             var inCloud = false
             var runner = turns
+            var chatMode = ChatMode.LOCAL
+            // An Auto chat's: where its router sent the message, and what came of it.
+            var route: AutoRouter.Route? = null
+            var askView: AskView? = null
+            var ranTools: Set<String> = emptySet()
             try {
                 // A message already stored (resumed after an unlock) goes where it was sent.
                 val wanted = when {
-                    locked || cloud == null -> false
-                    storedUserMessageId != null -> repository.message(storedUserMessageId)?.cloud == true
-                    toCloud != null -> toCloud
-                    chat != null -> repository.chat(chat)?.cloud == true
-                    else -> false
+                    cloud == null -> ChatMode.LOCAL
+                    storedUserMessageId != null -> if (repository.message(storedUserMessageId)?.cloud == true) ChatMode.CLOUD else chat?.let { repository.chat(it)?.mode }?.takeIf { it == ChatMode.AUTO } ?: ChatMode.LOCAL
+                    mode != null -> mode
+                    chat != null -> repository.chat(chat)?.mode ?: ChatMode.LOCAL
+                    else -> ChatMode.LOCAL
+                }.let { wanted ->
+                    // On the lock screen, never the cloud's chat; an Auto one stays Auto, its router keeping it all here.
+                    when {
+                        wanted == ChatMode.CLOUD && locked -> ChatMode.LOCAL
+                        wanted == ChatMode.AUTO && auto == null -> ChatMode.LOCAL
+                        else -> wanted
+                    }
                 }
-                if (wanted && cloud?.available?.invoke() != true) error(FirebaseBackend.NOT_SET_UP)
-                inCloud = wanted
+                if (wanted == ChatMode.CLOUD && cloud?.available?.invoke() != true) error(FirebaseBackend.NOT_SET_UP)
+                chatMode = wanted
+                inCloud = wanted == ChatMode.CLOUD
                 cloudTurn = inCloud
                 if (inCloud) {
                     runner = cloud!!.turns
                     cloud.backend.beginTurn()
                 }
                 if (chat == null) {
-                    chat = repository.createChat(hidden = hidden, cloud = inCloud)
+                    chat = repository.createChat(hidden = hidden, cloud = inCloud, auto = chatMode == ChatMode.AUTO)
                     // Both in one go, with no suspension between, so a screen matching the stream
                     // to its chat never sees one without the other.
                     _live.update { it?.copy(chatId = chat) }
                     listener.onChatCreated(chat)
-                } else if (storedUserMessageId == null && repository.chat(chat)?.cloud != inCloud) {
+                } else if (storedUserMessageId == null && repository.chat(chat)?.mode != chatMode) {
                     // Switched: the chat goes on where this message went.
-                    repository.setChatCloud(chat, inCloud)
+                    repository.setChatMode(chat, chatMode)
                 }
 
                 // Stored first, so nothing the user wrote is lost whatever happens next.
@@ -277,8 +308,24 @@ class ChatSender(
                     attachment?.takeIf { it.kind == AttachmentKind.DOCUMENT }?.path
                 }
                 val document = documentPath?.takeIf { java.io.File(it).isFile }?.let { AttachedDocument(it, AttachmentStore.documentName(it)) }
+                if (chatMode == ChatMode.AUTO) {
+                    val router = auto!!
+                    val before = repository.turnsBefore(chat, asked).lastOrNull { it.role == Role.ASSISTANT }
+                    route = AutoRouter.route(
+                        AutoRouter.Input(
+                            text = text,
+                            hasAttachment = promptAttachment != null || document != null || stored?.attachmentPath != null || attachment != null,
+                            aboutScreen = screen != null && QueryText.asksAboutScreen(text),
+                            locked = locked,
+                            lastWasAsk = RouteReason.of(before?.route)?.cloud == true,
+                            knownNames = runCatching { router.known().people }.getOrDefault(emptyList()),
+                        ),
+                        router.signals(),
+                    )
+                    Log.i(TAG, "Auto: ${route?.lane} (${route?.reason?.key ?: "the model decides"})")
+                }
                 // Never a screenshot to the cloud: the screen is the phone's.
-                runner.run(chat, asked, text, promptAttachment, locked, screen.takeUnless { inCloud }, heard, document).collect { event ->
+                runner.run(chat, asked, text, promptAttachment, locked, screen.takeUnless { inCloud }, heard, document, auto = route).collect { event ->
                     when (event) {
                         is TurnEvent.Text -> {
                             val first = reply.isEmpty()
@@ -310,8 +357,12 @@ class ChatSender(
                             step = event.label
                             publish(now = true)
                         }
-                        is TurnEvent.Memory -> listener.onMemory(event.chip)
+                        is TurnEvent.Memory -> {
+                            event.chip.ask?.let { askView = it }
+                            listener.onMemory(event.chip)
+                        }
                         is TurnEvent.Done -> {
+                            ranTools = event.tools
                             completed = true
                             standing = reply.length
                             step = null
@@ -346,12 +397,15 @@ class ChatSender(
                             }
                             // Who wrote it, for the line under it: the app itself, the phone's model, or the cloud's.
                             val byApp = timing.conversation in ANSWERED_BY_APP
+                            val answered = askView?.takeIf { it.outcome == AskView.OUTCOME_ANSWERED }
                             val servedBy = when {
+                                answered != null -> ServedBy.of(answered.servedBy) ?: ServedBy.ASKED_GEMINI
                                 byApp -> ServedBy.APP
                                 inCloud -> cloud?.backend?.lastServedBy?.value ?: ServedBy.CLOUD
                                 onNano -> ServedBy.NANO
                                 else -> ServedBy.GEMMA
                             }
+                            val reason = route?.let { reasonFor(it, askView, ranTools) }
                             assistantMessageId = repository.addMessage(
                                 chatId = chat,
                                 role = Role.ASSISTANT,
@@ -364,6 +418,7 @@ class ChatSender(
                                 timeToFirstTokenMs = timing.firstWordAt,
                                 cloud = inCloud,
                                 servedBy = servedBy.key,
+                                route = reason?.key,
                             )
                         }
                         runner.finish(chat, asked, assistantMessageId, completed = completed && !incomplete)
@@ -385,6 +440,21 @@ class ChatSender(
             }
         }
         return true
+    }
+
+    /** Why an Auto chat's reply came from where it did, for the line under it. */
+    private fun reasonFor(route: AutoRouter.Route, ask: AskView?, tools: Set<String>): RouteReason = when {
+        ask?.outcome == AskView.OUTCOME_ANSWERED -> RouteReason.of(ask.reason) ?: RouteReason.ASKED
+        ask?.outcome == AskView.OUTCOME_KEPT -> RouteReason.KEPT
+        ask?.outcome == AskView.OUTCOME_FAILED -> RouteReason.CLOUD_FAILED
+        route.reason != null && !route.reason.cloud -> route.reason
+        ToolCatalog.FIND_PHOTOS in tools -> RouteReason.USED_PHOTOS
+        ToolCatalog.CHECK_INBOX in tools -> RouteReason.USED_MESSAGES
+        ToolCatalog.READ_FILE in tools -> RouteReason.USED_FILES
+        ToolCatalog.HEALTH in tools -> RouteReason.USED_HEALTH
+        tools.any { it in ToolCatalog.ACTS } -> RouteReason.ACTED
+        ToolCatalog.SEARCH_MEMORY in tools || ToolCatalog.GET_UPCOMING in tools -> RouteReason.USED_MEMORY
+        else -> RouteReason.KNEW
     }
 
     /** Stops the reply in flight, keeping what it had said. */

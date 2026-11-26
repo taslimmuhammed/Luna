@@ -111,6 +111,16 @@ class ConversationManager(
      * recalls is whatever [memory], [retriever] and [noteIndex] can read, Cloud ones for this.
      */
     private val cloud: Boolean = false,
+    /**
+     * Auto chats' tools ([com.local.assistant.hybrid.ChatMode.AUTO]): [tools] with ask_gemini, and
+     * web_lookup through Gemini when the user has no search of their own. Part of the stable
+     * prefix as [tools] are, so a chat changing mode is rebuilt.
+     */
+    private val autoTools: () -> List<String> = { emptyList() },
+    /** Whether web_lookup is among [autoTools]. */
+    private val autoWebSearch: () -> Boolean = { false },
+    /** Whether the next new chat starts in Auto: what the conversation made ready for it is built as. */
+    private val newChatsAuto: () -> Boolean = { false },
 ) : ModelAccess {
 
     /**
@@ -164,6 +174,8 @@ class ConversationManager(
         val unsummarizedDropped: Int = 0,
         /** Built for the lock screen: none of the user's memory in it. */
         val locked: Boolean = false,
+        /** Built for an Auto chat: ask_gemini among its tools, and its rule in the instructions. */
+        val auto: Boolean = false,
         /**
          * Saved images already attached to a turn of this conversation. Stored history does not
          * carry them, so a rebuild starts empty; until then, attaching one again only muddles the
@@ -294,9 +306,11 @@ class ConversationManager(
         val now = now()
 
         val before = live
+        val auto = isAuto(chatId)
         val carriedOn = before?.takeIf {
             it.chatId == chatId &&
                 it.locked == locked &&
+                it.auto == auto &&
                 it.lastMessageId == (history.lastOrNull()?.id ?: 0L) &&
                 it.budget == budget &&
                 it.session.isAlive
@@ -730,7 +744,7 @@ class ConversationManager(
         if (history.isEmpty()) return
         val current = live
         if (current != null && current.chatId == chatId && !current.locked && current.lastMessageId == history.last().id &&
-            current.budget == budget && current.session.isAlive
+            current.budget == budget && current.session.isAlive && current.auto == isAuto(chatId)
         ) {
             return
         }
@@ -775,6 +789,7 @@ class ConversationManager(
             lastMessageId = 0L,
             windowStartId = fresh.windowStartId,
             prefaceTokens = fresh.prefaceTokens,
+            auto = fresh.auto,
         ).also { live = it }
     }
 
@@ -962,8 +977,9 @@ class ConversationManager(
         live?.let { close(it, "replaced") }
         val prefixInputs = prefixInputs(chatId, budget)
 
-        val declared = tools().takeIf { capabilities.tools }.orEmpty()
-        val toolTokens = toolTokens(capabilities)
+        val auto = isAuto(chatId)
+        val declared = declaredTools(auto).takeIf { capabilities.tools }.orEmpty()
+        val toolTokens = toolTokens(capabilities, auto)
 
         var historyEstimate = 0
         suspend fun open(): Pair<PromptPlan, ChatSession> {
@@ -1015,6 +1031,7 @@ class ConversationManager(
             prefaceTokens = counted?.let { (it - historyEstimate).coerceAtLeast(0) } ?: (plan.prefix.tokens + toolTokens),
             unsummarizedDropped = plan.history.droppedCount,
             locked = chatId in lockedChats,
+            auto = auto,
         ).also { live = it }
     }
 
@@ -1040,7 +1057,7 @@ class ConversationManager(
             // On the lock screen: the instructions and this chat's own summary, none of the user's
             // profile, agenda or other chats.
             return PrefixInputs(
-                instructions = instructions(),
+                instructions = instructions(isAuto(chatId)),
                 coreFacts = emptyList(),
                 summary = chat?.rollingSummary?.takeUnless { cloud }?.let { SummaryBlock(SummaryBlock.Kind.EARLIER_IN_CHAT, it) },
                 agendaDate = now().toLocalDate(),
@@ -1055,7 +1072,7 @@ class ConversationManager(
                 ?: memory.latestSessionSummary()?.let { SummaryBlock(SummaryBlock.Kind.LAST_SESSION, it) }
         }
         return PrefixInputs(
-            instructions = instructions(),
+            instructions = instructions(isAuto(chatId)),
             coreFacts = memory.coreFacts(),
             summary = summary,
             agendaDate = now().toLocalDate(),
@@ -1086,10 +1103,17 @@ class ConversationManager(
         return NoteLine(note.id, note.title, note.kind == NoteKind.LIST, whole, matched, note.updatedAt, shownAbove)
     }
 
-    private fun instructions() = Instructions.render(
+    /** Whether [chatId] is an Auto chat; for [FRESH], whether the next new chat will be. */
+    private suspend fun isAuto(chatId: Long): Boolean =
+        !cloud && if (chatId == FRESH) newChatsAuto() else chats.chat(chatId)?.auto == true
+
+    private fun declaredTools(auto: Boolean): List<String> = if (auto) autoTools() else tools()
+
+    private fun instructions(auto: Boolean) = Instructions.render(
         settings.systemPrompt,
-        withTools = tools().isNotEmpty() && backend.capabilities?.tools == true,
-        webSearch = webSearch(),
+        withTools = declaredTools(auto).isNotEmpty() && backend.capabilities?.tools == true,
+        webSearch = if (auto) autoWebSearch() else webSearch(),
+        ask = auto,
         photoSearch = photoSearch(),
         healthData = healthData(),
         fileSearch = fileSearch(),
@@ -1144,8 +1168,8 @@ class ConversationManager(
      * The runtime renders tool declarations in its own template format; the JSON is a fair,
      * conservative stand-in for what they cost.
      */
-    private fun toolTokens(capabilities: BackendCapabilities): Int {
-        val declared = tools().takeIf { capabilities.tools }.orEmpty()
+    private fun toolTokens(capabilities: BackendCapabilities, auto: Boolean): Int {
+        val declared = declaredTools(auto).takeIf { capabilities.tools }.orEmpty()
         return if (declared.isEmpty()) 0 else estimator.estimate(declared.joinToString("\n"))
     }
 

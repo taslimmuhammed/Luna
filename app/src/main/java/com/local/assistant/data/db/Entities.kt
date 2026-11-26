@@ -34,7 +34,16 @@ data class ChatEntity(
      */
     @ColumnInfo(defaultValue = "0")
     val cloud: Boolean = false,
-)
+    /**
+     * Auto mode ([com.local.assistant.hybrid.ChatMode.AUTO]): the chat runs on the phone's model,
+     * which may ask Gemini for help through a question it writes itself, with what it knows to be
+     * private hidden ([com.local.assistant.hybrid.Veil]). Never set together with [cloud].
+     */
+    @ColumnInfo(defaultValue = "0")
+    val auto: Boolean = false,
+) {
+    val mode: com.local.assistant.hybrid.ChatMode get() = com.local.assistant.hybrid.ChatMode.of(cloud = cloud, auto = auto)
+}
 
 /**
  * Persisted author of a message. Kept as a string column so adding roles later is a no-op.
@@ -107,4 +116,9 @@ data class MessageEntity(
     val cloud: Boolean = false,
     /** Which model wrote this reply ([com.local.assistant.hybrid.ServedBy]); null for the user's own turns. */
     val servedBy: String? = null,
+    /**
+     * In an Auto chat, why the reply came from where it did ([com.local.assistant.hybrid.RouteReason.key]),
+     * for the line under it; null elsewhere.
+     */
+    val route: String? = null,
 )

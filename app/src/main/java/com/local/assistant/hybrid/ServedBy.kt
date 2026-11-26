@@ -14,6 +14,12 @@ enum class ServedBy(val key: String, val label: String, val onDevice: Boolean) {
     /** Gemini in the cloud, through Firebase AI Logic. */
     CLOUD("cloud", "Cloud · Gemini", onDevice = false),
 
+    /**
+     * Gemini in the cloud, asked by the phone's model in an Auto chat ([ChatMode.AUTO]) with a
+     * question it wrote, private details hidden ([Veil]).
+     */
+    ASKED_GEMINI("asked_gemini", "Gemini · asked by Luna", onDevice = false),
+
     /** Answered by the app itself, no model: an alarm, a sum. */
     APP("app", "On this phone", onDevice = true),
     ;

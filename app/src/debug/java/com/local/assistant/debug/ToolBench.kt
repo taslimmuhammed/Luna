@@ -21,7 +21,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * people actually say? Each case is scored; each tuning of Nano ([NanoPrompt.Tuning]) runs every
  * case, with every tool the app can declare and its full instructions.
  *
- *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode tools [--es variants plain,docs+examples] [--es cases a,b] [--ez gemma true]
+ *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode tools [--es variants plain,docs+examples] [--es cases a,b] [--ez gemma true] [--ez auto true]
+ *
+ * [auto]: as an Auto chat, with ask_gemini declared and its rule, and its own cases ([AUTO_CASES])
+ * after the rest: does the model ask Gemini when it should, with roles for names, and still use
+ * the phone's tools for the user's own things?
  */
 class ToolBench(
     private val gemma: LlmBackend,
@@ -29,6 +33,7 @@ class ToolBench(
     private val log: (String) -> Unit,
     /** Chat's sampling, or another to compare (Nano's backend caps the temperature). */
     private val sampling: Sampling = Sampling.CHAT,
+    private val auto: Boolean = false,
 ) {
     /** What a right call looks like: [tool] (null: no call at all) and a pattern per argument. */
     data class Expect(val tool: String?, val args: Map<String, String> = emptyMap(), val absent: Map<String, String> = emptyMap())
@@ -43,12 +48,12 @@ class ToolBench(
     )
 
     private val now = "[Now: Tue 24 Nov 2026, 10:15]"
-    private val system = Instructions.render(persona, withTools = true, photoSearch = true, healthData = true, fileSearch = true, inbox = true)
-    private val tools = ToolCatalog.declarations(web = false, photos = true, health = true, files = true, inbox = true)
+    private val system = Instructions.render(persona, withTools = true, photoSearch = true, healthData = true, fileSearch = true, inbox = true, ask = auto)
+    private val tools = ToolCatalog.declarations(web = false, photos = true, health = true, files = true, inbox = true, ask = auto)
 
     suspend fun run(variants: List<NanoPrompt.Tuning>, cases: Set<String>?, gemma: Boolean) {
-        val chosen = CASES.filter { cases == null || it.id in cases }
-        log("# Tool benchmark, ${java.util.Date()}: ${chosen.size} cases, ${tools.size} tools, $sampling")
+        val chosen = (if (auto) CASES + AUTO_CASES else CASES).filter { cases == null || it.id in cases }
+        log("# Tool benchmark${if (auto) " (Auto chat)" else ""}, ${java.util.Date()}: ${chosen.size} cases, ${tools.size} tools, $sampling")
         log("")
         val scores = mutableListOf<String>()
         for (tuning in variants) {
@@ -160,6 +165,8 @@ class ToolBench(
         ToolCatalog.READ_FILE -> """{"ok":true,"found":"Resume_2026.pdf","opened":true}"""
         ToolCatalog.CALCULATE -> """{"ok":true,"result":"441"}"""
         ToolCatalog.GET_UPCOMING -> """{"ok":true,"items":[{"title":"Team call","at":"Wed 25 Nov 11:00"}]}"""
+        // In the app the answer is the reply itself; here, enough to end the turn.
+        ToolCatalog.ASK_GEMINI -> """{"ok":true,"answered":true,"by":"Gemini · asked by Luna"}"""
         else -> """{"ok":true}"""
     }
 
@@ -222,6 +229,23 @@ class ToolBench(
             Case("open_app", listOf("play Arijit Singh songs on YouTube"), listOf(Expect(ToolCatalog.OPEN_APP, mapOf("app" to "youtube")))),
             Case("no_tool_sky", listOf("why is the sky blue? one sentence"), listOf(Expect(null))),
             Case("no_tool_joke", listOf("tell me a short joke"), listOf(Expect(null))),
+        )
+
+        /**
+         * An Auto chat's: what [com.local.assistant.hybrid.AutoRouter] leaves to the phone's model
+         * (it names someone, or is about the user), where it should ask Gemini, and what it
+         * shouldn't. The ones the router sends straight on (long writing, code, translation) never
+         * reach the model, so aren't here.
+         */
+        val AUTO_CASES = listOf(
+            Case("ask_plan_dinner", listOf("plan Priya's birthday dinner, she's vegetarian and we have about 1500 rupees"), listOf(Expect(ToolCatalog.ASK_GEMINI, mapOf("question" to "dinner|birthday|party")))),
+            Case("ask_role_not_name", listOf("my friend Shiyas is moving to Berlin, give him tips for finding a flat there"), listOf(Expect(ToolCatalog.ASK_GEMINI, mapOf("question" to "berlin|flat|apartment"), absent = mapOf("question" to "shiyas")))),
+            Case("ask_about_user", listOf("I'm vegetarian and going to Tokyo next month, what should I eat there?"), listOf(Expect(ToolCatalog.ASK_GEMINI, mapOf("question" to "tokyo")))),
+            Case("ask_explain", listOf("explain in detail how a SIP in mutual funds works, with an example"), listOf(Expect(ToolCatalog.ASK_GEMINI, mapOf("question" to "sip|mutual")), Expect(null))),
+            Case("ask_after_inbox", listOf("did my landlord message me about the rent?"), listOf(Expect(ToolCatalog.CHECK_INBOX))),
+            Case("no_ask_remind", listOf("remind me to call the plumber at 5pm"), listOf(Expect(ToolCatalog.ADD_TASK, mapOf("title" to "plumber")))),
+            Case("no_ask_photos", listOf("show me photos from my Goa trip"), listOf(Expect(ToolCatalog.FIND_PHOTOS, mapOf("place" to "goa")), Expect(ToolCatalog.FIND_PHOTOS, mapOf("query" to "goa")))),
+            Case("no_ask_hello", listOf("hi! how's it going?"), listOf(Expect(null))),
         )
     }
 }

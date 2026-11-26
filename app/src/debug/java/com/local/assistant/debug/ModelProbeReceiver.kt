@@ -53,7 +53,9 @@ class ModelProbeReceiver : BroadcastReceiver() {
             }
             try {
                 when (intent.getStringExtra("mode")) {
-                    "tools" -> ToolBench(
+                    // --es model <file> [--es backend npu]: Gemma's part runs on that file (and backend),
+                    // and the app's own is put back after.
+                    "tools" -> withModel(context, container, intent.getStringExtra("model"), intent.getStringExtra("backend"), ::log) { ToolBench(
                         container.llmBackend,
                         container.settings.systemPrompt,
                         ::log,
@@ -63,11 +65,14 @@ class ModelProbeReceiver : BroadcastReceiver() {
                                 topK = intent.getStringExtra("topk")?.toIntOrNull() ?: chat.topK,
                             )
                         },
+                        auto = intent.getBooleanExtra("auto", false),
                     ).run(
-                        variants = intent.getStringExtra("variants")?.split(',')?.map { ToolBench.tuning(it.trim()) } ?: ToolBench.VARIANTS,
+                        // "none": Gemma only.
+                        variants = intent.getStringExtra("variants")?.takeIf { it != "none" }?.split(',')?.map { ToolBench.tuning(it.trim()) }
+                            ?: if (intent.getStringExtra("variants") == "none") emptyList() else ToolBench.VARIANTS,
                         cases = cases,
                         gemma = intent.getBooleanExtra("gemma", false),
-                    )
+                    ) }
                     // Puts back what tool calls changed, through the app's own undo: --es records 245,234
                     "undo" -> intent.getStringExtra("records").orEmpty().split(',').mapNotNull { it.trim().toLongOrNull() }.forEach { id ->
                         log("- undo $id: ${container.toolExecutor.undo(id)}")
@@ -75,6 +80,22 @@ class ModelProbeReceiver : BroadcastReceiver() {
                     "cloud" -> CloudProbe(container, ::log).run(
                         text = intent.getStringExtra("text") ?: "What's the capital of Australia? Answer in one sentence.",
                         chatId = intent.getLongExtra("chat", -1L).takeIf { it > 0 },
+                        mode = com.local.assistant.hybrid.ChatMode.of(intent.getStringExtra("chatmode")) ?: com.local.assistant.hybrid.ChatMode.CLOUD,
+                    )
+                    // A model file for the engine bench, fetched by the phone itself (adb pushes
+                    // ~3 MB/s over wireless debugging): --es url … --es name x.litertlm [--es sha256 …]
+                    "fetch" -> EngineBench.fetch(
+                        url = intent.getStringExtra("url") ?: error("No url"),
+                        into = File(context.filesDir, "bench/${intent.getStringExtra("name") ?: error("No name")}"),
+                        sha256 = intent.getStringExtra("sha256"),
+                        log = ::log,
+                    )
+                    "engine" -> EngineBench(context, container, ::log).run(
+                        modelPath = intent.getStringExtra("model") ?: container.settings.modelPath ?: error("No model file"),
+                        backendName = intent.getStringExtra("backend") ?: "gpu",
+                        mtp = intent.getBooleanExtra("mtp", false),
+                        contextTokens = intent.getIntExtra("ctx", 4096),
+                        rounds = intent.getIntExtra("rounds", 2),
                     )
                     "voice" -> VoiceBench(context, container.llmBackend, ::log).run(download = intent.getBooleanExtra("download", false))
                     else -> ModelProbe(context, container.llmBackend, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
@@ -86,6 +107,38 @@ class ModelProbeReceiver : BroadcastReceiver() {
                 file.appendText("PROBE DONE\n")
                 Log.i(TAG, "PROBE DONE")
             }
+        }
+    }
+
+    /**
+     * Runs [block] with the app's chat model swapped for [model] and [backend], when given, through
+     * [com.local.assistant.llm.LlmService.bench]: in memory only, so the app's settings stay as
+     * they were even if the process dies mid-run. The NPU runs at 4,096 tokens, the window the
+     * uncompiled E2B file's masks are built for; at the app's 8K it loaded and never answered.
+     */
+    private suspend fun withModel(
+        context: Context,
+        container: com.local.assistant.AppContainer,
+        model: String?,
+        backend: String?,
+        log: (String) -> Unit,
+        block: suspend () -> Unit,
+    ) {
+        if (model == null && backend == null) return block()
+        val npu = backend == "npu"
+        val libs = context.applicationInfo.nativeLibraryDir
+        container.llmService.unload()
+        container.llmService.bench = com.local.assistant.llm.LlmService.Bench(
+            modelPath = model,
+            backend = if (npu) ({ com.google.ai.edge.litertlm.Backend.NPU(nativeLibraryDir = libs) }) else null,
+            contextTokens = if (npu) 4096 else null,
+        )
+        log("Gemma runs on ${File(model ?: container.settings.modelPath.orEmpty()).name}, ${backend ?: "the usual backend"}, for this run")
+        try {
+            block()
+        } finally {
+            container.llmService.unload()
+            container.llmService.bench = null
         }
     }
 

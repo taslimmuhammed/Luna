@@ -36,7 +36,8 @@ sealed interface TurnEvent {
     /** Something was saved, scheduled or forgotten; its chip is also stored with the chat. */
     data class Memory(val recordId: Long, val chip: MemoryChip) : TurnEvent
 
-    data class Done(val stats: GenStats?) : TurnEvent
+    /** [tools]: the tools the turn ran, for an Auto chat's line on where the reply came from. */
+    data class Done(val stats: GenStats?, val tools: Set<String> = emptySet()) : TurnEvent
 
     /** On the lock screen, the request needs more than is allowed there: unlock, then ask again. */
     data object NeedsUnlock : TurnEvent
@@ -89,6 +90,12 @@ class TurnRunner(
          * on it ("remind me to pay this bill") goes to the chat model with notes on it.
          */
         document: AttachedDocument? = null,
+        /**
+         * In an Auto chat, where its router sent this message ([com.local.assistant.hybrid.AutoRouter]):
+         * straight to Gemini ([com.local.assistant.hybrid.AutoRouter.Lane.ASK_FIRST]), or to the
+         * phone's model with ask_gemini to call if it needs to. Null in a Local or Cloud chat.
+         */
+        auto: com.local.assistant.hybrid.AutoRouter.Route? = null,
     ): Flow<TurnEvent> = flow {
         // Never over the lock screen; shown to the model only for a message about it ("share
         // this with Anjali"), though the tools may still send it or save it either way.
@@ -124,6 +131,26 @@ class TurnRunner(
                     emit(TurnEvent.Done(null))
                     return@flow
                 }
+            }
+        }
+        // Straight to Gemini, as the router said: no turn of the phone's model first. If Gemini
+        // can't answer, or the user keeps it on the phone, the phone's model answers as usual.
+        if (auto?.lane == com.local.assistant.hybrid.AutoRouter.Lane.ASK_FIRST && attachment == null && document == null && !showScreen) {
+            emit(TurnEvent.Step(ToolSteps.ASKING_GEMINI))
+            val call = com.local.assistant.llm.ToolCall(
+                ToolCatalog.ASK_GEMINI,
+                linkedMapOf("question" to userText, "web" to (auto.reason == com.local.assistant.hybrid.RouteReason.LIVE)),
+            )
+            val outcome = tools.runInstant(call, ToolContext(chatId, userMessageId, userText, locked, screenshot, heard = heard, auto = auto))
+            if (outcome.chip != null && outcome.recordId != null) emit(TurnEvent.Memory(outcome.recordId, outcome.chip))
+            val answer = outcome.reply
+            if (outcome.ok && answer != null) {
+                TurnTimings.current?.conversation = ASKED_GEMINI
+                emit(TurnEvent.Text(answer))
+                val told = if (answer.length > TOLD_CHARS) answer.take(TOLD_CHARS).trimEnd() + "…" else answer
+                conversations.answeredWithoutModel(chatId, userMessageId, locked, userText, call.name, outcome.result, told)
+                emit(TurnEvent.Done(null, setOf(call.name)))
+                return@flow
             }
         }
         val asked = android.os.SystemClock.elapsedRealtime()
@@ -186,7 +213,7 @@ class TurnRunner(
                 val recording = turn.recording?.let { PromptAttachment(it, AttachmentKind.AUDIO) }
                 val sent = listOfNotNull(screenshot?.takeIf { showScreen }?.let { PromptAttachment(it, AttachmentKind.IMAGE) }) +
                     (attachment?.let(::listOf) ?: recording?.let(::listOf) ?: turn.recalledImages.map { PromptAttachment(it, AttachmentKind.IMAGE) })
-                val context = ToolContext(chatId, userMessageId, userText, locked, screenshot, heard = recording != null, earlierText = turn.earlierText, documentNotes = notes.orEmpty())
+                val context = ToolContext(chatId, userMessageId, userText, locked, screenshot, heard = recording != null, earlierText = turn.earlierText, documentNotes = notes.orEmpty(), auto = auto)
                 tools.run(turn.session, turn.envelope.text, sent, context, sources = listOf(turn.prefix), canRebuild = !turn.fresh && !rebuiltForPhotos).collect { event ->
                     when (event) {
                         is LoopEvent.Text -> {
@@ -229,7 +256,7 @@ class TurnRunner(
                                 val (recordId, chip) = tools.showRelatedPhotos(chatId, turn.relatedPhotos)
                                 emit(TurnEvent.Memory(recordId, chip))
                             }
-                            emit(TurnEvent.Done(event.stats))
+                            emit(TurnEvent.Done(event.stats, event.tools))
                         }
                         LoopEvent.Overflow -> {
                             if (retried) error("That message is too long for the model's window.")
@@ -311,6 +338,12 @@ class TurnRunner(
     fun onUserActivity() = scheduler.onUserActivity()
 
     companion object {
+        /** How [TurnTimings] marks a turn Gemini answered with no turn of the phone's model. */
+        const val ASKED_GEMINI = "asked_gemini"
+
+        /** Of a Gemini answer, what the phone's model is told was said, until it next rebuilds. */
+        private const val TOLD_CHARS = 600
+
         /** The reply came out garbled on an engine just loaded again, too ([com.local.assistant.memory.tools.GarbledText]). */
         const val GARBLED_AGAIN = "My reply came out garbled, even after restarting the model. Closing the app and opening it again should fix it."
 

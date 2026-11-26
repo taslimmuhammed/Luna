@@ -111,6 +111,14 @@ object NanoPrompt {
             - "Continue" means go on from exactly where your last reply stopped.
             """.trimIndent(),
         )
+        if (ToolCatalog.ASK_GEMINI in declared) {
+            append(
+                "\n- ask_gemini is for long writing, planning, comparing and detailed explanations. Its question must stand on its own " +
+                    "and carry only what the answer needs: a name only if the answer uses it, never phone numbers, addresses or ID " +
+                    "numbers, and never a message, file or health reading copied in. " +
+                    "Never use it for reminders, alarms, calls, messages, photos, files, notes or small talk.",
+            )
+        }
     }
 
     /** One example per tool, phrased unlike the benchmark's cases. */
@@ -134,6 +142,8 @@ object NanoPrompt {
         ToolCatalog.OPEN_APP to "\"directions to Lulu mall\" → open_app(app=\"maps\", query=\"Lulu mall\")",
         ToolCatalog.CALCULATE to "\"15% tip on 860\" → calculate(expression=\"860*15/100\")",
         ToolCatalog.WEB_SEARCH to "\"will it rain in Kochi today\" → web_lookup(query=\"Kochi weather today\")",
+        ToolCatalog.ASK_GEMINI to "\"write a toast for Anu's farewell, she's moving to Canada\" → ask_gemini(question=\"Write a short farewell toast for Anu, a colleague who is moving to Canada\")",
+        ToolCatalog.ASK_GEMINI to "\"plan a 3-day Kochi trip for me and my parents, we're vegetarian\" → ask_gemini(question=\"Plan a 3-day trip to Kochi for a family of three\", about_user=\"vegetarian; travelling with parents\")",
     )
 
     /**
@@ -150,8 +160,11 @@ object NanoPrompt {
 
     private val BRACKETED = Regex("\\[[^\\]]*]")
 
-    /** Cheap to offer, and wanted in all sorts of messages. */
-    private val ALWAYS = setOf(ToolCatalog.SAVE_FACT, ToolCatalog.SEARCH_MEMORY)
+    /**
+     * Cheap to offer, and wanted in all sorts of messages. ask_gemini too, where declared (Auto
+     * chats): whatever a message is about, a part of it may be better asked in the cloud.
+     */
+    private val ALWAYS = setOf(ToolCatalog.SAVE_FACT, ToolCatalog.SEARCH_MEMORY, ToolCatalog.ASK_GEMINI)
 
     private fun words(vararg w: String) = Regex("\\b(" + w.joinToString("|") + ")")
 

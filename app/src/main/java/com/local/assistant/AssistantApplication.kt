@@ -437,7 +437,33 @@ class AppContainer(context: Context) {
         summarizer = summarizer,
         noteIndex = { userNotes.all().map { NoteTitle(it.id, it.title, it.kind == NoteKind.LIST) } },
         inSight = { appForeground.isForeground },
+        autoTools = {
+            ToolCatalog.declarations(
+                web = webSearch.enabled || cloudSearch.enabled,
+                photos = photoSearchReady(),
+                health = healthTools.available(),
+                files = fileSearchReady(),
+                inbox = inboxReady(),
+                ask = true,
+            )
+        },
+        autoWebSearch = { webSearch.enabled || cloudSearch.enabled },
+        newChatsAuto = { newChatsMode() == com.local.assistant.hybrid.ChatMode.AUTO },
     )
+
+    /**
+     * The mode a new chat starts in, as it would now: what Settings says, but Local until the user
+     * has agreed to what that mode sends, and Local when this build has no cloud.
+     */
+    fun newChatsMode(): com.local.assistant.hybrid.ChatMode {
+        val wanted = settings.newChatsMode
+        return when {
+            !hybridSetup.cloudAvailable -> com.local.assistant.hybrid.ChatMode.LOCAL
+            wanted == com.local.assistant.hybrid.ChatMode.AUTO && settings.autoConsented -> wanted
+            wanted == com.local.assistant.hybrid.ChatMode.CLOUD && settings.cloudConsented -> wanted
+            else -> com.local.assistant.hybrid.ChatMode.LOCAL
+        }
+    }
 
     val embeddingQueue: EmbeddingQueue = EmbeddingQueue(
         archive = archive,
@@ -619,6 +645,8 @@ class AppContainer(context: Context) {
         onImageSaved = ::rereadSavedImage,
         device = deviceTools,
         web = WebTools(webSearch),
+        ask = { askTools },
+        autoWeb = { autoWebTools },
         photos = PhotoTools(
             galleryIndex,
             ready = ::photoSearchReady,
@@ -785,6 +813,8 @@ class AppContainer(context: Context) {
         agenda = database.agendaDao(),
         notes = database.userNoteDao(),
         onChanged = { cloudConversations.prefixMayHaveChanged() },
+        asksToday = settings.observeCloudAsks { java.time.LocalDate.now().toString() },
+        asksPerDay = { if (hybridSetup.configured) hybridSetup.autoDailyAsks else 0 },
     )
 
     val cloudTurnRunner = TurnRunner(cloudConversations, cloudScheduler, cloudToolLoop, onExchangeStored = { userMessageId ->
@@ -885,6 +915,37 @@ class AppContainer(context: Context) {
     /** Voice messages written down as they're recorded, by the phone's own recogniser. */
     val transcriber = com.local.assistant.voice.Transcriber(context, appScope)
 
+    /**
+     * Auto mode (hybrid/AutoRouter): the phone's model, which may ask Gemini a question it writes,
+     * with the names, numbers and places Luna knows hidden first (hybrid/Veil). Each question is
+     * written to [cloudLedger] as it goes, and counted against the day's ([HybridSetup.autoDailyAsks]).
+     */
+    val veilSource = com.local.assistant.hybrid.VeilSource(
+        context = context,
+        contacts = { AndroidContacts(context, permissions).all() },
+        facts = { database.factDao().all() },
+        faces = { runCatching { faceIndex.people().map { it.name }.filter { it.isNotBlank() } }.getOrDefault(emptyList()) },
+    )
+
+    val cloudAsk = com.local.assistant.hybrid.CloudAsk(
+        setup = hybridSetup,
+        ledger = cloudLedger,
+        backend = cloudBackend,
+        asked = settings::cloudAsks,
+        count = settings::countCloudAsk,
+    )
+
+    /** A question to Gemini that copies a private message out word for word, held for the user's say-so. */
+    val askConfirm = com.local.assistant.hybrid.AskConfirm()
+
+    private val askTools: com.local.assistant.hybrid.AskTools? =
+        if (hybridSetup.configured) com.local.assistant.hybrid.AskTools(cloudAsk, chatRepository, askConfirm) else null
+
+    /** web_lookup in an Auto chat with no search key of the user's: Google's, through Gemini. */
+    private val autoWebTools: WebTools? = if (hybridSetup.configured) WebTools(cloudSearch) else null
+
+    val hybridSignals = com.local.assistant.hybrid.HybridSignals(context, hybridSetup, cloudAsk)
+
     /** Sends messages and streams replies for the chat and the assistant overlay alike. */
     val chatSender = ChatSender(
         chatRepository,
@@ -893,6 +954,7 @@ class AppContainer(context: Context) {
         appScope,
         local = chatBackend,
         cloud = ChatSender.Cloud(cloudTurnRunner, cloudBackend, available = { hybridSetup.cloudAvailable }),
+        auto = if (hybridSetup.configured) ChatSender.Auto(signals = hybridSignals::now, known = veilSource::known) else null,
     )
 
     /** The natural voices' downloads (Settings › Voice). Once one arrives, the assistant speaks with it. */

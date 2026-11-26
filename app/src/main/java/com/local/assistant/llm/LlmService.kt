@@ -180,7 +180,8 @@ class LlmService(
     private suspend fun ensureEngine(): Engine? = loadMutex.withLock {
         engine?.let { return@withLock it }
 
-        val modelPath = settings.modelPath
+        val bench = bench
+        val modelPath = bench?.modelPath ?: settings.modelPath
         if (modelPath == null || !File(modelPath).isFile) {
             _state.value = State.NoModel
             return@withLock null
@@ -218,19 +219,20 @@ class LlmService(
         val features = declared.features
 
         val died = settings.initInFlightTokens
-        if (died > SettingsStore.DEFAULT_CONTEXT_TOKENS && died == settings.contextTokens) {
+        if (bench == null && died > SettingsStore.DEFAULT_CONTEXT_TOKENS && died == settings.contextTokens) {
             Log.w(TAG, "The last load at $died tokens killed the app; back to ${SettingsStore.DEFAULT_CONTEXT_TOKENS}")
             settings.contextTokens = SettingsStore.DEFAULT_CONTEXT_TOKENS
             settings.contextFellBack = true
         }
         settings.initInFlightTokens = 0
-        val sizes = listOf(settings.contextTokens, SettingsStore.DEFAULT_CONTEXT_TOKENS).distinct()
+        val sizes = bench?.contextTokens?.let(::listOf)
+            ?: listOf(settings.contextTokens, SettingsStore.DEFAULT_CONTEXT_TOKENS).distinct()
 
         for (attempt in attempts()) {
             _loadingBackend.value = attempt.label
             for (tokens in sizes) {
                 val loaded = withContext(Dispatchers.IO) { loadAt(attempt, modelPath, modalities, tokens) } ?: continue
-                if (tokens != settings.contextTokens) {
+                if (bench == null && tokens != settings.contextTokens) {
                     settings.contextTokens = tokens
                     settings.contextFellBack = true
                 }
@@ -253,7 +255,7 @@ class LlmService(
                 )
                 _state.value = State.Ready(attempt.label, tokens)
                 val loadMs = SystemClock.elapsedRealtime() - loadStarted
-                settings.lastEngineLoadMs = loadMs
+                if (bench == null) settings.lastEngineLoadMs = loadMs
                 Log.i(TAG, "Loaded ${attempt.label} at $tokens tokens in $loadMs ms")
                 com.local.assistant.memory.prompt.TurnTimings.event(
                     "engine_load",
@@ -283,8 +285,27 @@ class LlmService(
         }
     }
 
+    /**
+     * Debug benches only (ModelProbeReceiver): what to load in place of the app's own, held in
+     * memory and never saved, so a bench the process dies in leaves the app's settings as they
+     * were. Null in normal use.
+     */
+    internal data class Bench(
+        val modelPath: String? = null,
+        /** The one backend to try, such as the NPU, which the app doesn't offer. */
+        val backend: (() -> Backend)? = null,
+        val contextTokens: Int? = null,
+    )
+
+    @Volatile
+    internal var bench: Bench? = null
+
     /** Backends to try, best first. */
     private fun attempts(): List<LoadAttempt> = buildList {
+        bench?.backend?.let {
+            add(LoadAttempt("bench", speculative = false, it))
+            return@buildList
+        }
         if (settings.useGpu) {
             if (settings.useSpeculativeDecoding) {
                 add(LoadAttempt("GPU + MTP", speculative = true) { Backend.GPU() })
