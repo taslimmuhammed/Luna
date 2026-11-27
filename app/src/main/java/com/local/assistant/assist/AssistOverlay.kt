@@ -125,7 +125,7 @@ import com.local.assistant.data.db.AttachmentKind
 import com.local.assistant.data.db.MessageEntity
 import com.local.assistant.data.db.Role
 import com.local.assistant.device.PermissionBroker
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.EngineState
 import com.local.assistant.ui.chat.MarkdownText
 import com.local.assistant.ui.chat.MemoryChips
 import com.local.assistant.ui.chat.ToolPermissionRequests
@@ -256,8 +256,8 @@ fun AssistOverlay(
 
     // ---- What the assistant is doing, for the light, the orb and the waveform ----
 
-    val noModel = engine is LlmService.State.NoModel
-    val failed = engine as? LlmService.State.Failed
+    val noModel = engine is EngineState.NoModel
+    val failed = engine as? EngineState.Failed
     val waiting = pending != null && streaming == null
     val busy = streaming != null || pending != null
     val orb = when {
@@ -368,7 +368,7 @@ fun AssistOverlay(
                     val hasTranscript = messages.isNotEmpty() || pending != null || streaming != null
                     when {
                         lockedOut -> LockedOut(onOpenSettings)
-                        noModel -> NeedsApp("The assistant needs its model first. Open the app to download or import it.", onOpenApp = openFully)
+                        noModel -> NeedsApp("The assistant runs on Gemini Nano, which this phone doesn't have. Open the app to chat in Cloud mode.", onOpenApp = openFully)
                         failed != null && !hasTranscript -> NeedsApp("${failed.message} Open the app to try again.", onOpenApp = openFully)
                         hasTranscript -> Transcript(
                             messages = messages,
@@ -377,7 +377,7 @@ fun AssistOverlay(
                             streaming = streaming,
                             step = step,
                             waiting = waiting,
-                            modelLoading = engine as? LlmService.State.Loading,
+                            modelLoading = engine as? EngineState.Loading,
                             viewModel = viewModel,
                             modifier = Modifier.weight(1f, fill = false),
                         )
@@ -394,8 +394,8 @@ fun AssistOverlay(
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                             )
                         }
-                        if (!hasTranscript && engine !is LlmService.State.Ready && failed == null) {
-                            Caption("Waking up the model. It answers as soon as it's ready.")
+                        if (!hasTranscript && engine !is EngineState.Ready && failed == null) {
+                            Caption("Checking for Gemini Nano. It answers as soon as it's ready.")
                         }
                         notice?.let { Caption(it, onClick = viewModel::dismissNotice) }
 
@@ -416,7 +416,7 @@ fun AssistOverlay(
                         } else {
                             TextControls(
                                 busy = busy,
-                                canTalk = engine !is LlmService.State.Ready || viewModel.hearsAudio(),
+                                canTalk = viewModel.hearsAudio(),
                                 onSend = viewModel::sendText,
                                 onStop = viewModel::stop,
                                 onTalk = listen,
@@ -646,7 +646,7 @@ private fun Transcript(
     /** What the reply is waiting on: recall, a tool. */
     step: String?,
     waiting: Boolean,
-    modelLoading: LlmService.State.Loading?,
+    modelLoading: EngineState.Loading?,
     viewModel: AssistViewModel,
     modifier: Modifier = Modifier,
 ) {

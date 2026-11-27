@@ -1,5 +1,9 @@
 # Gemma 4 E2B on the GPU and the NPU, against E4B (24 Nov 2026)
 
+> Historical. Gemma was removed from the app on 27 Nov 2026; Luna runs on Gemini Nano. The
+> engine bench (`EngineBench`, `--es mode engine`) and the `-Pnpu` build went with it, so the
+> commands below no longer work.
+
 Measured on the OnePlus 15 (CPH2745, Snapdragon 8 Elite Gen 5 / SM8850, 16 GB, Android 16) with
 LiteRT-LM 0.19.1, the runtime the app ships, through the debug build's probes
 (`EngineBench` for speed, `ToolBench` for tool calls). Nothing here changes the release app: the

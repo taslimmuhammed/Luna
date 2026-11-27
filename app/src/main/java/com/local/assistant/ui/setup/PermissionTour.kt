@@ -177,9 +177,8 @@ internal fun PermissionTour(container: AppContainer, onDone: () -> Unit, preview
         checked++
         if (library.access() == PhotoLibrary.Access.NONE) return@rememberLauncherForActivityResult
         settings.findPeople = findPeople
-        // The photo model now, beside the chat model: photos are searchable sooner.
-        val models = container.galleryModelManager
-        if (models.installed.value == null && models.transfer.value == null) models.download()
+        // The photo model now, and the voice after it: photos are searchable sooner.
+        container.downloadSetupModels()
         container.indexPhotosIfReady()
     }
 
@@ -568,7 +567,7 @@ private fun AllSet(given: Map<Ask, Boolean>, onAllow: (Ask) -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "Next: the model download (${com.local.assistant.model.formatBytes(com.local.assistant.model.ModelCatalog.SIZE_BYTES)}, best on Wi-Fi), then your photos are indexed. You'll see each step.",
+            "Next: photo search's download (${com.local.assistant.model.formatBytes(com.local.assistant.gallery.GalleryModel.SIZE_BYTES)}, best on Wi-Fi), then your photos are indexed. You'll see each step.",
             style = MaterialTheme.typography.bodySmall,
             color = AppColors.TextSecondary,
         )

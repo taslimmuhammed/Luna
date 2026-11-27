@@ -1,7 +1,5 @@
 package com.local.assistant.ui.setup
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
@@ -31,7 +29,6 @@ import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Face
 import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Search
@@ -42,6 +39,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -56,7 +54,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.local.assistant.AppContainer
 import com.local.assistant.gallery.PhotoLibrary
-import com.local.assistant.model.TransferKind
 import com.local.assistant.ui.theme.AppColors
 import com.local.assistant.ui.theme.Glass
 import com.local.assistant.ui.theme.GlassMark
@@ -65,14 +62,13 @@ import com.local.assistant.ui.theme.GlassShapes
 import com.local.assistant.ui.theme.fadingEdges
 import com.local.assistant.ui.theme.glass
 import com.local.assistant.voice.VoicePack
+import kotlinx.coroutines.launch
 
 /** What setup is doing now, from the app's downloads and indexes, kept current. */
 @Composable
-internal fun rememberSetupState(container: AppContainer, preparing: Boolean): SetupState {
-    val chatModel by container.modelManager.installed.collectAsStateWithLifecycle()
-    val chatTransfer by container.modelManager.transfer.collectAsStateWithLifecycle()
-    val chatError by container.modelManager.error.collectAsStateWithLifecycle()
-    val engine by container.llmService.state.collectAsStateWithLifecycle()
+internal fun rememberSetupState(container: AppContainer): SetupState {
+    val engine by container.chatBackend.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { container.chatBackend.answersOnPhone() }
     val photoModel by container.galleryModelManager.installed.collectAsStateWithLifecycle()
     val photoTransfer by container.galleryModelManager.transfer.collectAsStateWithLifecycle()
     val photoError by container.galleryModelManager.error.collectAsStateWithLifecycle()
@@ -85,16 +81,10 @@ internal fun rememberSetupState(container: AppContainer, preparing: Boolean): Se
     val memoryLeft by container.embeddingQueue.remaining.collectAsStateWithLifecycle()
     val paused by container.downloadsPaused.collectAsStateWithLifecycle()
     // Read again as a download stops or starts: a stopped one leaves its part behind.
-    val partial = remember(chatTransfer == null, chatModel) { container.modelManager.partialBytes() }
     val photoPartial = remember(photoTransfer == null, photoModel, paused) { container.galleryModelManager.partialBytes() }
     val voicePartial = remember(voiceProgress == null, voice, paused) { kokoro.partialBytes() }
     return SetupState(
-        chatModel = chatModel,
-        chatTransfer = chatTransfer,
-        chatError = chatError,
-        chatPartialBytes = partial,
         engine = engine,
-        preparing = preparing,
         photoModel = photoModel,
         photoTransfer = photoTransfer,
         photoError = photoError,
@@ -113,21 +103,19 @@ internal fun rememberSetupState(container: AppContainer, preparing: Boolean): Se
 }
 
 /**
- * The first setup, step by step, each with how far it's got: the chat model's download, its first
- * load, the photo model and the natural voice after it, then the photos, their faces and earlier
- * chats being indexed (the user, 2026-11-15: "show indexing and background process while the
- * first install, and show user it's going on"). It all carries on with the app closed, with a
- * notification, and the page says so.
+ * The first setup, step by step, each with how far it's got: whether the phone has Gemini Nano,
+ * the photo model's download and the natural voice after it, then the photos, their faces and
+ * earlier chats being indexed (the user, 2026-11-15: "show indexing and background process while
+ * the first install, and show user it's going on"). It all carries on with the app closed, with
+ * a notification, and the page says so.
  *
- * On a first run ([onBack] null) it is the whole app until the chat model is ready, then "Start
- * chatting" leads on while the rest keeps going; the chat's progress pill opens it again, with
- * a way back. Replaces the bare model page and the "Getting ready" page on first run; the model
- * page itself stays in Settings.
+ * On a first run ([onBack] null) it is the whole app until Nano has been checked for, then
+ * "Start chatting" leads on while the rest keeps going; the chat's progress pill opens it again,
+ * with a way back.
  */
 @Composable
-fun SetupScreen(container: AppContainer, preparing: Boolean, onStart: () -> Unit, onBack: (() -> Unit)? = null) {
-    val state = rememberSetupState(container, preparing)
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(container.modelManager::importFrom) }
+fun SetupScreen(container: AppContainer, onStart: () -> Unit, onBack: (() -> Unit)? = null) {
+    val state = rememberSetupState(container)
     val actions = remember(container) {
         // Starting one ends a pause, and the others paused with it carry on too, in turn.
         fun resuming(start: () -> Unit) {
@@ -136,20 +124,16 @@ fun SetupScreen(container: AppContainer, preparing: Boolean, onStart: () -> Unit
             if (paused) container.resumeDownloads()
         }
         SetupActions(
-            download = { resuming(container.modelManager::download) },
-            import = { picker.launch(arrayOf("*/*")) },
-            stop = {
-                // Pause stops every download (the user, 2026-11-15: it didn't); a copy is cancelled.
-                if (container.modelManager.transfer.value?.kind == TransferKind.IMPORT) container.modelManager.cancel() else container.pauseDownloads()
-            },
+            download = { resuming(container::downloadSetupModels) },
+            // Pause stops every download (the user, 2026-11-15: it didn't).
+            stop = container::pauseDownloads,
             start = { kind ->
                 when (kind) {
-                    StepKind.CHAT_MODEL -> {
-                        container.modelManager.clearError()
-                        resuming(container.modelManager::download)
+                    StepKind.CHAT_MODEL -> container.appScope.launch { container.chatBackend.recheck() }
+                    StepKind.PHOTO_MODEL -> {
+                        container.galleryModelManager.clearError()
+                        resuming(container::downloadSetupModels)
                     }
-                    StepKind.READY -> container.llmService.retryLoad()
-                    StepKind.PHOTO_MODEL -> resuming(container.galleryModelManager::download)
                     StepKind.VOICE -> resuming(container.voicePack(VoicePack.KOKORO)::download)
                     else -> Unit
                 }
@@ -161,10 +145,9 @@ fun SetupScreen(container: AppContainer, preparing: Boolean, onStart: () -> Unit
 
 /** What the setup page's buttons do. */
 internal class SetupActions(
-    /** The chat model's Download or Resume. */
+    /** The photo model's Download or Resume, the voice after it. */
     val download: () -> Unit,
-    val import: () -> Unit,
-    /** The chat model's Pause, or Cancel for a copy. */
+    /** A download's Pause. */
     val stop: () -> Unit,
     /** A step's Try again or Resume. */
     val start: (StepKind) -> Unit,
@@ -174,7 +157,8 @@ internal class SetupActions(
 @Composable
 internal fun SetupPage(state: SetupState, actions: SetupActions, onStart: () -> Unit, onBack: (() -> Unit)?) {
     val steps = state.steps()
-    val ready = state.chatModel != null && !state.preparing && state.engine !is com.local.assistant.llm.LlmService.State.Failed
+    // Once Nano has been checked for: a phone without it chats in Cloud mode.
+    val ready = state.engine != com.local.assistant.llm.EngineState.Idle
 
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -269,16 +253,14 @@ private fun StepRow(step: SetupStep, actions: SetupActions) {
                 }
             }
             when {
-                step.kind == StepKind.CHAT_MODEL && step.status == StepStatus.START -> Row(
+                step.kind == StepKind.PHOTO_MODEL && step.status == StepStatus.START -> Row(
                     Modifier.padding(top = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // The size is in the line above.
                     NextButton(if (step.fraction != null) "Resume" else "Download", actions.download, icon = null)
-                    Spacer(Modifier.width(12.dp))
-                    SmallAction("Use a file", actions.import)
                 }
-                step.kind == StepKind.CHAT_MODEL && step.stop != null -> SmallAction(step.stop, actions.stop, Modifier.padding(top = 8.dp))
+                step.stop != null -> SmallAction(step.stop, actions.stop, Modifier.padding(top = 8.dp))
                 step.resume -> SmallAction("Resume", { actions.start(step.kind) }, Modifier.padding(top = 8.dp))
                 step.status == StepStatus.FAILED -> SmallAction("Try again", { actions.start(step.kind) }, Modifier.padding(top = 8.dp))
             }
@@ -332,7 +314,6 @@ private fun StepMark(step: SetupStep) {
 
 private fun stepIcon(kind: StepKind): ImageVector = when (kind) {
     StepKind.CHAT_MODEL -> Icons.AutoMirrored.Outlined.Chat
-    StepKind.READY -> Icons.Outlined.Memory
     StepKind.PHOTO_MODEL -> Icons.Outlined.Search
     StepKind.VOICE -> Icons.Outlined.RecordVoiceOver
     StepKind.PHOTOS -> Icons.Outlined.PhotoLibrary
@@ -362,7 +343,7 @@ internal fun SmallAction(text: String, onClick: () -> Unit, modifier: Modifier =
  */
 @Composable
 fun SetupNote(container: AppContainer, onOpen: () -> Unit) {
-    val pill = rememberSetupState(container, preparing = false).pill() ?: return
+    val pill = rememberSetupState(container).pill() ?: return
     SetupPillView(pill, onOpen)
 }
 

@@ -140,6 +140,12 @@ class AiCoreBackend(
 
     override suspend fun ensureReady(): Boolean = inspect().available
 
+    /** Asks AICore again, forgetting what it said last time (after a failure, or a download). */
+    suspend fun refresh(): Report {
+        lock.withLock { report = null }
+        return inspect()
+    }
+
     /** Downloads Nano when AICore says it can, reporting each status as it goes. */
     suspend fun download(onStatus: (String) -> Unit) {
         client().download().collect { onStatus(it.toString()) }

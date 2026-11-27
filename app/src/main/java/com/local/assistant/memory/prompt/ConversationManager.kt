@@ -11,7 +11,7 @@ import com.local.assistant.llm.ChatSession
 import com.local.assistant.llm.ChatSpec
 import com.local.assistant.llm.LlmBackend
 import com.local.assistant.llm.ContextWindow
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.ContextUsage
 import com.local.assistant.llm.Sampling
 import com.local.assistant.llm.ToolReplay
 import com.local.assistant.memory.tools.ToolCatalog
@@ -250,10 +250,10 @@ class ConversationManager(
     /** A send is waiting while the chat's older turns are summarised to make room. */
     val tidying: StateFlow<Boolean> = _tidying.asStateFlow()
 
-    private val _contextUsage = MutableStateFlow<LlmService.ContextUsage?>(null)
+    private val _contextUsage = MutableStateFlow<ContextUsage?>(null)
 
     /** Real context consumption of the current chat's conversation, as the runtime counts it. */
-    val contextUsage: StateFlow<LlmService.ContextUsage?> = _contextUsage.asStateFlow()
+    val contextUsage: StateFlow<ContextUsage?> = _contextUsage.asStateFlow()
 
     /**
      * Readies the conversation for [chatId] and builds this turn's envelope. [userMessageId] is
@@ -1151,7 +1151,7 @@ class ConversationManager(
 
     private fun publishUsage(current: Live) {
         val window = backend.capabilities?.maxContextTokens ?: current.budget.contextTokens
-        _contextUsage.value = current.session.tokenCount()?.let { LlmService.ContextUsage(it, window, current.chatId) }
+        _contextUsage.value = current.session.tokenCount()?.let { ContextUsage(it, window, current.chatId) }
     }
 
     /** [reason]: what closed it, for the timing record. */

@@ -19,7 +19,10 @@ class SettingsStore(context: Context) {
         if (RETIRED_KEYS.any(prefs::contains)) prefs.edit { RETIRED_KEYS.forEach(::remove) }
     }
 
-    /** Absolute path of the installed .litertlm file, or null when no model is installed. */
+    /**
+     * Absolute path of Gemma 4 E4B's .litertlm file, the chat model before Gemini Nano, or null
+     * when there's none. Nothing loads it now; kept so Settings › Model can offer to delete it.
+     */
     var modelPath: String?
         get() = prefs.getString(KEY_MODEL_PATH, null)
         set(value) = prefs.edit { if (value == null) remove(KEY_MODEL_PATH) else putString(KEY_MODEL_PATH, value) }
@@ -122,6 +125,18 @@ class SettingsStore(context: Context) {
     var accessAsked: Boolean
         get() = prefs.getBoolean(KEY_ACCESS_ASKED, false)
         set(value) = prefs.edit { putBoolean(KEY_ACCESS_ASKED, value) }
+
+    /**
+     * The first setup's page was left with "Start chatting". Installs from when Gemma was the
+     * chat model left it once Gemma was here, so they count as done (written down the first time
+     * it's read, before that file may be deleted).
+     */
+    var setupDone: Boolean
+        get() {
+            if (!prefs.contains(KEY_SETUP_DONE)) prefs.edit { putBoolean(KEY_SETUP_DONE, modelPath != null) }
+            return prefs.getBoolean(KEY_SETUP_DONE, false)
+        }
+        set(value) = prefs.edit { putBoolean(KEY_SETUP_DONE, value) }
 
     /**
      * Messages that arrive (notifications from chat apps, and the SMS inbox while the app is the
@@ -365,6 +380,7 @@ class SettingsStore(context: Context) {
         private const val KEY_TOUR_SEEN = "tour_seen"
         private const val KEY_WEB_SEARCH_ASKED = "web_search_asked"
         private const val KEY_ACCESS_ASKED = "access_asked"
+        private const val KEY_SETUP_DONE = "setup_done"
         private const val KEY_KEEP_MESSAGES = "keep_messages"
         private const val KEY_INBOX_IGNORED = "inbox_ignored_apps"
         private const val KEY_SMS_READ_UP_TO = "sms_read_up_to"

@@ -3,7 +3,7 @@ package com.local.assistant.memory.summary
 import android.util.Log
 import com.local.assistant.data.db.Role
 import com.local.assistant.llm.LlmBackend
-import com.local.assistant.llm.NanoFirstBackend
+import com.local.assistant.llm.NanoBackend
 import com.local.assistant.memory.db.SessionDao
 import com.local.assistant.memory.db.SummaryStatus
 import com.local.assistant.memory.prompt.MemoryBudget
@@ -69,7 +69,7 @@ class SessionSummaries(
                         Outcome.Written(summarizer.session(turns, cap))
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
-                    } catch (e: NanoFirstBackend.NanoUnavailable) {
+                    } catch (e: NanoBackend.NanoUnavailable) {
                         // Not the summary's fault: it stays pending for next time.
                         Outcome.Unavailable
                     } catch (e: Exception) {

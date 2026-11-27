@@ -112,7 +112,6 @@ private fun AppRoot(
     settingsToOpen: Boolean,
     onSettingsOpened: () -> Unit,
 ) {
-    val installed by container.modelManager.installed.collectAsStateWithLifecycle()
     var showSettings by remember { mutableStateOf(false) }
     // The settings page open: kept here, so returning from the model, profile or web search
     // screen comes back to it.
@@ -133,24 +132,8 @@ private fun AppRoot(
     var webSearchAsked by remember { mutableStateOf(container.settings.webSearchAsked || container.webSearch.enabled) }
     var accessAsked by remember { mutableStateOf(container.settings.accessAsked) }
 
-    // A model installed in this run (the first download, or an import) is loaded, and the first
-    // chat's prompt read, before the chat opens: otherwise the first message waits ~15 s. A model
-    // that was already there at launch loads in the background, as before.
-    var hadModel by rememberSaveable { mutableStateOf(installed != null) }
-    var preparing by rememberSaveable { mutableStateOf(false) }
     // A first setup stays on its page, the rest going on, until the user moves on to the chat.
-    var setupDone by rememberSaveable { mutableStateOf(installed != null) }
-    LaunchedEffect(installed != null) {
-        if (installed != null && !hadModel) {
-            preparing = true
-            try {
-                container.prepareFirstChat()
-            } finally {
-                preparing = false
-            }
-        }
-        hadModel = installed != null
-    }
+    var setupDone by remember { mutableStateOf(container.settings.setupDone) }
 
     // The overlay's "Open in app": to the chat, from whichever screen the app was left on.
     LaunchedEffect(chatToOpen) {
@@ -219,17 +202,23 @@ private fun AppRoot(
         return
     }
 
-    // With no model there is nothing to chat with, so setup is the whole app: the download, the
-    // first load, and the indexing after, until "Start chatting".
-    if (installed == null || preparing || !setupDone) {
-        SetupScreen(container = container, preparing = preparing, onStart = { setupDone = true })
+    // A first setup is the whole app until "Start chatting": whether the phone has Gemini Nano,
+    // the downloads, and the indexing after.
+    if (!setupDone) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        SetupScreen(container = container, onStart = {
+            container.settings.setupDone = true
+            setupDone = true
+            // The wake word listens from setup's end on: the service only starts in the foreground.
+            com.local.assistant.assist.KeepReadyService.update(context)
+        })
         return
     }
 
     // Opened from the chat's setup note, while indexing or a download goes on.
     if (showSetupScreen) {
         BackHandler { showSetupScreen = false }
-        SetupScreen(container = container, preparing = false, onStart = {}, onBack = { showSetupScreen = false })
+        SetupScreen(container = container, onStart = {}, onBack = { showSetupScreen = false })
         return
     }
 
@@ -237,8 +226,8 @@ private fun AppRoot(
     if (showModelScreen) {
         BackHandler { showModelScreen = false }
         ModelScreen(
-            modelManager = container.modelManager,
-            llmService = container.llmService,
+            nano = container.chatBackend,
+            oldModel = container.oldChatModel,
             onBack = { showModelScreen = false },
             memorySearch = remember(container) { container.memorySearchControls() },
         )
@@ -277,7 +266,7 @@ private fun AppRoot(
         }
         val memoryViewModel: MemoryViewModel = viewModel(factory = MemoryViewModel.factory(container))
         SettingsScreen(
-            llmService = container.llmService,
+            nano = container.chatBackend,
             settings = container.settings,
             speaker = container.speaker,
             voicePacks = container.voicePacks,

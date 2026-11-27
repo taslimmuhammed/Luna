@@ -85,8 +85,7 @@ import com.local.assistant.assist.KeepReadyService
 import com.local.assistant.assist.LockScreenNotice
 import com.local.assistant.away.AwayBrief
 import com.local.assistant.data.prefs.SettingsStore
-import com.local.assistant.llm.LlmService
-import com.local.assistant.model.ModelCatalog
+import com.local.assistant.llm.EngineState
 import com.local.assistant.model.formatBytes
 import com.local.assistant.ui.memory.MemoryViewModel
 import com.local.assistant.ui.theme.AppColors
@@ -133,7 +132,7 @@ enum class SettingsSection(val title: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    llmService: LlmService,
+    nano: com.local.assistant.llm.NanoBackend,
     settings: SettingsStore,
     speaker: Speaker,
     voicePacks: List<VoicePackInstaller>,
@@ -197,16 +196,19 @@ fun SettingsScreen(
                     SettingsSection.MESSAGES -> MessagesSettings(settings, inbox, smsSync, onToolsChanged)
                     SettingsSection.HEALTH -> HealthSettings(health, settings)
                     SettingsSection.MODEL -> {
-                        val state by llmService.state.collectAsStateWithLifecycle()
+                        val state by nano.state.collectAsStateWithLifecycle()
                         NavRow(
                             "Model and memory search",
                             listOfNotNull(
-                                ModelCatalog.DISPLAY_NAME,
-                                (state as? LlmService.State.Ready)?.let { "running on ${it.backend}" },
+                                "Gemini Nano",
+                                when (state) {
+                                    is EngineState.Ready -> "on this phone"
+                                    EngineState.NoModel -> "not on this phone"
+                                    else -> null
+                                },
                             ).joinToString(" · "),
                             onOpenModel,
                         )
-                        ContextWindow(llmService, settings)
                     }
                     SettingsSection.CLOUD -> CloudSettings(settings, hybrid, onOpenCloudLedger)
                     SettingsSection.MEMORY -> MemorySettings(memory)
@@ -267,10 +269,7 @@ private fun MainPage(
     SectionRow(
         Icons.Outlined.Memory,
         SettingsSection.MODEL.title,
-        listOfNotNull(
-            ModelCatalog.DISPLAY_NAME,
-            "${settings.contextTokens / 1024}K window",
-        ).joinToString(" \u00b7 "),
+        "Gemini Nano \u00b7 memory search",
     ) { onSection(SettingsSection.MODEL) }
     SectionRow(Icons.Outlined.Cloud, SettingsSection.CLOUD.title, cloudSummary(hybrid, settings)) { onSection(SettingsSection.CLOUD) }
     SectionRow(Icons.Outlined.Public, "Web search", if (webSearchOn) "On \u00b7 Tavily" else "Off \u00b7 add a Tavily key to turn it on", onOpenWebSearch)
@@ -283,77 +282,6 @@ private fun MainPage(
     SectionRow(Icons.Outlined.Info, SettingsSection.ABOUT.title, "The models, data and libraries the app uses, and their licences") { onSection(SettingsSection.ABOUT) }
     if (WakeSamples.available(context)) {
         SectionRow(Icons.Outlined.Science, SettingsSection.TEST_BUILD.title, "Wake word samples for training") { onSection(SettingsSection.TEST_BUILD) }
-    }
-}
-
-/**
- * The window the model runs with. 8K by default; more keeps longer chats in view, at the cost of
- * memory and a slower start. A size the phone can't hold falls back to 8K on its own.
- */
-@Composable
-private fun ContextWindow(llmService: LlmService, settings: SettingsStore) {
-    val active by llmService.activeContextTokens.collectAsStateWithLifecycle()
-    var pending by remember { mutableStateOf<Int?>(null) }
-    val chosen = settings.contextTokens
-
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Text("Context window", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextPrimary)
-        Text(
-            "How much of a chat the model keeps in view. Larger windows keep longer chats but use more memory and take longer to start.",
-            style = MaterialTheme.typography.bodySmall,
-            color = AppColors.TextSecondary,
-        )
-        for (tokens in SettingsStore.CONTEXT_CHOICES) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .selectable(selected = tokens == chosen, role = Role.RadioButton) { if (tokens != chosen) pending = tokens }
-                    .padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = tokens == chosen, onClick = null)
-                Column(Modifier.padding(start = 8.dp)) {
-                    Text(
-                        "${tokens / 1024}K tokens" + if (tokens == SettingsStore.DEFAULT_CONTEXT_TOKENS) " (default)" else "",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = AppColors.TextPrimary,
-                    )
-                    CONTEXT_NOTES[tokens]?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = AppColors.TextSecondary) }
-                }
-            }
-        }
-        if (settings.contextFellBack) {
-            Text(
-                "The larger window didn't fit on this phone, so the model is running at 8K.",
-                style = MaterialTheme.typography.bodySmall,
-                color = AppColors.Danger,
-            )
-        } else if (active > 0 && active != chosen) {
-            Text("Running at ${active / 1024}K until the model restarts.", style = MaterialTheme.typography.bodySmall, color = AppColors.TextSecondary)
-        }
-    }
-
-    pending?.let { tokens ->
-        AlertDialog(
-            onDismissRequest = { pending = null },
-            title = { Text("Use a ${tokens / 1024}K window?") },
-            text = {
-                Text(
-                    "The model restarts, which takes a few seconds, and any open chat is rebuilt. " + when {
-                        tokens > SettingsStore.DEFAULT_CONTEXT_TOKENS -> "If this phone can't hold it, the app goes back to 8K."
-                        tokens < SettingsStore.DEFAULT_CONTEXT_TOKENS -> "The assistant will see only the last exchange or two of a chat."
-                        else -> ""
-                    },
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    pending = null
-                    llmService.setContextTokens(tokens)
-                }) { Text("Restart the model") }
-            },
-            dismissButton = { TextButton(onClick = { pending = null }) { Text("Cancel") } },
-        )
     }
 }
 
@@ -960,9 +888,9 @@ private fun LicenceEntries() {
         ),
     )
     Entry(
-        "Gemma 4 E4B (the assistant)",
-        "By Google, in LiteRT-LM format. Apache License 2.0.",
-        listOf("Apache License 2.0" to "https://www.apache.org/licenses/LICENSE-2.0"),
+        "Gemini Nano (the assistant)",
+        "By Google, on the phone through Android's AICore and ML Kit's GenAI Prompt API, under the ML Kit terms.",
+        listOf("ML Kit terms" to "https://developers.google.com/ml-kit/terms"),
     )
     Entry(
         "EmbeddingGemma 2 (memory and photo search)",

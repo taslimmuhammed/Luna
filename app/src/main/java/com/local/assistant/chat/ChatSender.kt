@@ -13,7 +13,6 @@ import com.local.assistant.hybrid.Veil
 import com.local.assistant.memory.retrieval.QueryText
 import com.local.assistant.memory.tools.AskView
 import com.local.assistant.memory.tools.ToolCatalog
-import com.local.assistant.llm.LlmService
 import com.local.assistant.llm.ContextWindow
 import com.local.assistant.llm.PromptAttachment
 import com.local.assistant.media.AttachmentStore
@@ -45,11 +44,10 @@ import kotlinx.coroutines.withContext
  */
 class ChatSender(
     private val repository: ChatRepository,
-    private val llm: LlmService,
     private val turns: TurnRunner,
     private val scope: CoroutineScope,
-    /** Trial: what Local chats run on, to tell a Nano reply from a Gemma one. */
-    private val local: com.local.assistant.llm.NanoFirstBackend? = null,
+    /** What Local chats run on, Gemini Nano: what its replies measured. */
+    private val local: com.local.assistant.llm.NanoBackend? = null,
     /** Cloud mode, where the build has it ([com.local.assistant.hybrid.CloudScope]). */
     private val cloud: Cloud? = null,
     /** Auto mode, where the build has the cloud ([com.local.assistant.hybrid.ChatMode.AUTO]). */
@@ -124,10 +122,6 @@ class ChatSender(
     private var job: Job? = null
     private var stopRequested = false
 
-    /** The turn in flight is a Cloud one: stopping it is cancelling its request, not the phone's model. */
-    @Volatile
-    private var cloudTurn = false
-
     /**
      * Stores [text] and [attachment] in [chatId] — a new chat when null — and streams the reply.
      * Whichever screen sends it, the model gets the same turn: the same instructions, memory and
@@ -183,7 +177,6 @@ class ChatSender(
         mode: ChatMode? = null,
     ): Boolean {
         stopRequested = false
-        cloudTurn = false
         // Plain words only: a photo or a recording is shown once stored, as it was sent.
         _live.value = Live(chatId, "", owner, asked = prompt.takeIf { it.isNotEmpty() && attachment == null && storedUserMessageId == null })
         val timing = TurnTimings.begin(if (hidden) "panel" else "chat")
@@ -245,7 +238,6 @@ class ChatSender(
                 if (wanted == ChatMode.CLOUD && cloud?.available?.invoke() != true) error(FirebaseBackend.NOT_SET_UP)
                 chatMode = wanted
                 inCloud = wanted == ChatMode.CLOUD
-                cloudTurn = inCloud
                 if (inCloud) {
                     runner = cloud!!.turns
                     cloud.backend.beginTurn()
@@ -389,12 +381,7 @@ class ChatSender(
                         // Stopped for an unlock: whatever the model began to say isn't the answer.
                         if (needsUnlock) reply.clear()
                         if (reply.isNotEmpty()) {
-                            val onNano = !inCloud && local?.lastWasNano?.value == true
-                            val stats = when {
-                                inCloud -> cloud?.backend?.lastStats?.value
-                                onNano -> local?.lastStats?.value
-                                else -> llm.lastGenerationStats.value
-                            }
+                            val stats = if (inCloud) cloud?.backend?.lastStats?.value else local?.lastStats?.value
                             // Who wrote it, for the line under it: the app itself, the phone's model, or the cloud's.
                             val byApp = timing.conversation in ANSWERED_BY_APP
                             val answered = askView?.takeIf { it.outcome == AskView.OUTCOME_ANSWERED }
@@ -402,8 +389,7 @@ class ChatSender(
                                 answered != null -> ServedBy.of(answered.servedBy) ?: ServedBy.ASKED_GEMINI
                                 byApp -> ServedBy.APP
                                 inCloud -> cloud?.backend?.lastServedBy?.value ?: ServedBy.CLOUD
-                                onNano -> ServedBy.NANO
-                                else -> ServedBy.GEMMA
+                                else -> ServedBy.NANO
                             }
                             val reason = route?.let { reasonFor(it, askView, ranTools) }
                             assistantMessageId = repository.addMessage(
@@ -461,9 +447,7 @@ class ChatSender(
     fun stop() {
         if (!isBusy) return
         stopRequested = true
-        // Ask the runtime to stop decoding, then unwind the collector. A Cloud turn's request
-        // stops with its collector, and the phone's model may be busy with something else.
-        if (!cloudTurn) llm.stop()
+        // Unwinding the collector stops the request, on the phone's model or the cloud's.
         job?.cancel()
     }
 

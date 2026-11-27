@@ -119,7 +119,8 @@ import com.local.assistant.data.db.AttachmentKind
 import com.local.assistant.data.db.MessageEntity
 import com.local.assistant.data.db.Role
 import com.local.assistant.data.repo.ChatRepository
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.ContextUsage
+import com.local.assistant.llm.EngineState
 import com.local.assistant.media.RecordingState
 import com.local.assistant.ui.theme.AppColors
 import com.local.assistant.ui.theme.liquidGlass
@@ -180,7 +181,7 @@ fun ChatScreen(
     val streamingStep by viewModel.streamingStep.collectAsStateWithLifecycle()
     val pendingQuestion by viewModel.pendingQuestion.collectAsStateWithLifecycle()
     val isGenerating by viewModel.isGenerating.collectAsStateWithLifecycle()
-    val engineState by viewModel.engineState.collectAsStateWithLifecycle()
+    val nanoState by viewModel.engineState.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val contextUsage by viewModel.contextUsage.collectAsStateWithLifecycle()
     val supportsImages by viewModel.supportsImages.collectAsStateWithLifecycle()
@@ -196,6 +197,8 @@ fun ChatScreen(
     val busyElsewhere by viewModel.busyElsewhere.collectAsStateWithLifecycle()
     val mode by viewModel.mode.collectAsStateWithLifecycle()
     val cloudMode = mode == ChatMode.CLOUD
+    // A Cloud chat doesn't wait on the phone's model, nor need one: a phone without Nano chats there.
+    val engineState = if (cloudMode) EngineState.Ready(backend = "Gemini", contextTokens = 0) else nanoState
     val askCloudConsent by viewModel.askCloudConsent.collectAsStateWithLifecycle()
     if (askCloudConsent) {
         CloudConsentDialog(onAgree = { viewModel.answerCloudConsent(true) }, onDismiss = { viewModel.answerCloudConsent(false) })
@@ -226,7 +229,7 @@ fun ChatScreen(
         )
     }
     // A chat that has used Cloud or Auto says under every message where it went, and switches are
-    // marked. Trial: Nano replies are labelled too, to tell them from Gemma's.
+    // marked; so does one with replies from the phone's model, Nano's or, before it, Gemma's.
     val showWhere = mode != ChatMode.LOCAL || messages.any { it.cloud || it.servedBy != null || it.route != null }
     val sentIn = remember(messages) { modesSentIn(messages) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -464,8 +467,8 @@ fun ChatScreen(
                 val blankChat = messages.isEmpty() && streamingText == null
                 // A message waiting on the model says so in its own line ("Loading the model ·
                 // about 6 s left"); the pill above it said "Getting ready…" too.
-                val waitSaysIt = streamingText != null && (engineState is LlmService.State.Loading || engineState == LlmService.State.Idle)
-                if ((!blankChat && !waitSaysIt) || engineState is LlmService.State.Failed || engineState == LlmService.State.NoModel) {
+                val waitSaysIt = streamingText != null && (engineState is EngineState.Loading || engineState == EngineState.Idle)
+                if ((!blankChat && !waitSaysIt) || engineState is EngineState.Failed || engineState == EngineState.NoModel) {
                     EngineBanner(engineState, onRetry = viewModel::retryLoad)
                 }
                 val tidying by viewModel.tidying.collectAsStateWithLifecycle()
@@ -489,9 +492,9 @@ fun ChatScreen(
                 // While the model loads, a message can still be sent: it waits for the engine.
                 // Not while the overlay's reply is running, though: one turn at a time.
                 val canSend = !busyElsewhere && (
-                    engineState is LlmService.State.Ready ||
-                        engineState is LlmService.State.Loading ||
-                        engineState is LlmService.State.Idle
+                    engineState is EngineState.Ready ||
+                        engineState is EngineState.Loading ||
+                        engineState is EngineState.Idle
                     )
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -505,7 +508,7 @@ fun ChatScreen(
                             enabled = canSend && !isGenerating,
                             onPick = sendWithTick,
                             status = when (engineState) {
-                                is LlmService.State.Loading, LlmService.State.Idle -> "Getting ready…"
+                                is EngineState.Loading, EngineState.Idle -> "Getting ready…"
                                 else -> null
                             },
                             modifier = Modifier.fillMaxSize(),
@@ -575,7 +578,7 @@ fun ChatScreen(
                                         // A message sent while the model is still starting waits
                                         // for it: say so, so the wait doesn't look like a hang. Then
                                         // what is being done: "Checking your memories…", a tool.
-                                        ThinkingIndicator(label = streamingStep, loading = engineState as? LlmService.State.Loading)
+                                        ThinkingIndicator(label = streamingStep, loading = engineState as? EngineState.Loading)
                                     } else {
                                         AssistantMessage(partial, streaming = true)
                                         // A tool partway through the reply.
@@ -712,12 +715,12 @@ private fun QuietBanner(text: String) {
 }
 
 @Composable
-private fun EngineBanner(state: LlmService.State, onRetry: () -> Unit) {
-    val failed = state is LlmService.State.Failed
+private fun EngineBanner(state: EngineState, onRetry: () -> Unit) {
+    val failed = state is EngineState.Failed
     val message = when (state) {
-        is LlmService.State.Loading, LlmService.State.Idle -> "Getting ready…"
-        is LlmService.State.Failed -> "${state.message} Tap to try again."
-        LlmService.State.NoModel -> "No model installed."
+        is EngineState.Loading, EngineState.Idle -> "Getting ready…"
+        is EngineState.Failed -> "${state.message} Tap to try again."
+        EngineState.NoModel -> "This phone doesn't have Gemini Nano, so Local chats can't run here. Cloud mode works."
         else -> null
     } ?: return
 
@@ -729,7 +732,7 @@ private fun EngineBanner(state: LlmService.State, onRetry: () -> Unit) {
  * gone, at which point it says what to do about it.
  */
 @Composable
-private fun ContextMeter(usage: LlmService.ContextUsage?) {
+private fun ContextMeter(usage: ContextUsage?) {
     if (usage == null) return
     Text(
         text = if (usage.isNearlyFull) {

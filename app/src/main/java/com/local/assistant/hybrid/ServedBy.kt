@@ -5,7 +5,7 @@ package com.local.assistant.hybrid
  * user can always see where an answer came from. [onDevice] is what the badge leads with.
  */
 enum class ServedBy(val key: String, val label: String, val onDevice: Boolean) {
-    /** Gemma 4 on the phone, through LiteRT-LM. */
+    /** Gemma 4 on the phone, through LiteRT-LM: replies from before Gemini Nano (27 Nov 2026). */
     GEMMA("gemma", "On this phone · Gemma 4", onDevice = true),
 
     /** Gemini Nano on the phone, through Firebase AI Logic's on-device inference (AICore). */

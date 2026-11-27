@@ -1,6 +1,6 @@
 # Cloud mode: hybrid inference with Firebase AI Logic
 
-Local Assistant runs entirely on the phone (Gemma 4 through LiteRT-LM). Cloud mode adds Gemini
+Local Assistant runs entirely on the phone (Gemini Nano through Android's AICore). Cloud mode adds Gemini
 through Firebase AI Logic, **per chat and only when the user switches it on**. The rule it keeps:
 
 > The cloud model is only ever shown what was already said to it.
@@ -17,7 +17,7 @@ through Firebase AI Logic, **per chat and only when the user switches it on**. T
 
 > The cloud knows the world. Luna knows you, and decides what the cloud needs to hear.
 
-In an Auto chat the phone's model (Gemma 4, or Gemini Nano) answers, with all of the user's own
+In an Auto chat the phone's model (Gemini Nano) answers, with all of the user's own
 things: photos, messages, files, health, memory. Gemini is one of its tools, `ask_gemini`, for
 what a phone model does poorly: long writing, code, translation, planning, comparing, detailed
 explanations, live facts.
@@ -87,12 +87,12 @@ Every reply shows a badge saying where it came from.
 
 | Situation | Model | Firebase AI Logic mode |
 |---|---|---|
-| Local chat | Gemma 4 on the phone (LiteRT-LM) | none: never touches Firebase |
+| Local chat | Gemini Nano on the phone (AICore, ML Kit GenAI Prompt API) | none: never touches Firebase |
 | Cloud chat | Gemini (`cloud_model`, default `gemini-3.5-flash-lite`) | `ONLY_IN_CLOUD`, with function calling over the app's tools |
 | Cloud chat, offline or quota spent | Gemini Nano on the phone (AICore) | `ONLY_ON_DEVICE`, with the instructions and recent turns in one prompt and no tools |
 | Document attached to a Cloud message | Nano first if short enough, otherwise Gemini | `PREFER_ON_DEVICE` / `ONLY_IN_CLOUD` |
 | `web_lookup` in a Cloud chat | Gemini with Grounding with Google Search, or the user's Tavily key if set | `ONLY_IN_CLOUD` |
-| Auto chat | Gemma 4 or Gemini Nano on the phone | none, unless it asks Gemini |
+| Auto chat | Gemini Nano on the phone | none, unless it asks Gemini |
 | Auto chat's question to Gemini (`ask_gemini`) | Gemini (`cloud_model`), with what the phone's model chose to send | `PREFER_IN_CLOUD`: Nano on the phone if the cloud can't be reached |
 | Auto chat's question needing the web | Gemini with Grounding with Google Search | `ONLY_IN_CLOUD` |
 
@@ -150,3 +150,7 @@ photo and file search. During #BuildHybridAI I added Cloud mode with Firebase AI
 - Auto mode: the phone's model decides per message and asks Gemini only questions it writes,
   with only what the phone's model decides the answer needs (IDs never sent), a paste guard,
   a "What Gemini saw" view, and `PREFER_IN_CLOUD` hybrid inference falling back to Nano.
+- The phone's own model moved from Gemma 4 E4B (a 3.66 GB download, ~10 s to load) to Gemini
+  Nano, which Android keeps: chats, the assistant overlay (on the lock screen too), photo and
+  document reading, summaries and the "While you were away" brief. AICore answers only an app
+  in front, so memory upkeep that needs the model runs when Luna is opened, not overnight.

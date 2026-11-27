@@ -255,7 +255,7 @@ private val ACTION_INSET = (ACTION_SIZE - ACTION_ICON) / 2
 fun ThinkingIndicator(
     modifier: Modifier = Modifier,
     label: String? = null,
-    loading: com.local.assistant.llm.LlmService.State.Loading? = null,
+    loading: com.local.assistant.llm.EngineState.Loading? = null,
 ) {
     val transition = rememberInfiniteTransition(label = "thinking")
     val alpha by transition.animateFloat(
@@ -299,7 +299,7 @@ fun ThinkingIndicator(
 private const val SHOW_SECONDS_AFTER_MS = 3_000L
 
 /** What [ThinkingIndicator] says at [now]: never just a dot. */
-internal fun waitingText(label: String?, loading: com.local.assistant.llm.LlmService.State.Loading?, shownAt: Long, now: Long): String {
+internal fun waitingText(label: String?, loading: com.local.assistant.llm.EngineState.Loading?, shownAt: Long, now: Long): String {
     if (loading != null) {
         val left = loading.expectedMs?.let { (loading.startedAt + it - now + 999) / 1000 }
         return when {

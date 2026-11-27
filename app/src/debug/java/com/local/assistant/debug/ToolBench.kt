@@ -21,14 +21,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * people actually say? Each case is scored; each tuning of Nano ([NanoPrompt.Tuning]) runs every
  * case, with every tool the app can declare and its full instructions.
  *
- *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode tools [--es variants plain,docs+examples] [--es cases a,b] [--ez gemma true] [--ez auto true]
+ *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode tools [--es variants plain,docs+examples] [--es cases a,b] [--ez auto true]
  *
  * [auto]: as an Auto chat, with ask_gemini declared and its rule, and its own cases ([AUTO_CASES])
  * after the rest: does the model ask Gemini when it should, with roles for names, and still use
  * the phone's tools for the user's own things?
  */
 class ToolBench(
-    private val gemma: LlmBackend,
     private val persona: String,
     private val log: (String) -> Unit,
     /** Chat's sampling, or another to compare (Nano's backend caps the temperature). */
@@ -51,7 +50,7 @@ class ToolBench(
     private val system = Instructions.render(persona, withTools = true, photoSearch = true, healthData = true, fileSearch = true, inbox = true, ask = auto)
     private val tools = ToolCatalog.declarations(web = false, photos = true, health = true, files = true, inbox = true, ask = auto)
 
-    suspend fun run(variants: List<NanoPrompt.Tuning>, cases: Set<String>?, gemma: Boolean) {
+    suspend fun run(variants: List<NanoPrompt.Tuning>, cases: Set<String>?) {
         val chosen = (if (auto) CASES + AUTO_CASES else CASES).filter { cases == null || it.id in cases }
         log("# Tool benchmark${if (auto) " (Auto chat)" else ""}, ${java.util.Date()}: ${chosen.size} cases, ${tools.size} tools, $sampling")
         log("")
@@ -63,10 +62,6 @@ class ToolBench(
                 return
             }
             scores += bench("nano $tuning", nano, chosen)
-        }
-        if (gemma) {
-            this.gemma.ensureReady()
-            scores += bench("gemma", this.gemma, chosen)
         }
         log("## Scores")
         scores.forEach(log)

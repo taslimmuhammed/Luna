@@ -27,10 +27,10 @@ import kotlinx.coroutines.withTimeout
 import java.io.File
 
 /**
- * Debug builds only. Runs the same cases through Gemma 4 (LiteRT-LM) and Gemini Nano (AICore),
- * with the app's own instructions and tools, and writes what each did to files/model-probe.md.
+ * Debug builds only. Runs cases through Gemini Nano (AICore), with the app's own instructions and
+ * tools, and writes what it did to files/model-probe.md.
  *
- *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev [--es only nano|gemma] [--es nano preview|stable|preview_fast]
+ *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev [--es only nano] [--es nano preview|stable|preview_fast]
  *
  * AICore runs only for an app in the foreground, so open the app first.
  */
@@ -53,10 +53,7 @@ class ModelProbeReceiver : BroadcastReceiver() {
             }
             try {
                 when (intent.getStringExtra("mode")) {
-                    // --es model <file> [--es backend npu]: Gemma's part runs on that file (and backend),
-                    // and the app's own is put back after.
-                    "tools" -> withModel(context, container, intent.getStringExtra("model"), intent.getStringExtra("backend"), ::log) { ToolBench(
-                        container.llmBackend,
+                    "tools" -> ToolBench(
                         container.settings.systemPrompt,
                         ::log,
                         Sampling.CHAT.let { chat ->
@@ -67,12 +64,9 @@ class ModelProbeReceiver : BroadcastReceiver() {
                         },
                         auto = intent.getBooleanExtra("auto", false),
                     ).run(
-                        // "none": Gemma only.
-                        variants = intent.getStringExtra("variants")?.takeIf { it != "none" }?.split(',')?.map { ToolBench.tuning(it.trim()) }
-                            ?: if (intent.getStringExtra("variants") == "none") emptyList() else ToolBench.VARIANTS,
+                        variants = intent.getStringExtra("variants")?.split(',')?.map { ToolBench.tuning(it.trim()) } ?: ToolBench.VARIANTS,
                         cases = cases,
-                        gemma = intent.getBooleanExtra("gemma", false),
-                    ) }
+                    )
                     // Puts back what tool calls changed, through the app's own undo: --es records 245,234
                     "undo" -> intent.getStringExtra("records").orEmpty().split(',').mapNotNull { it.trim().toLongOrNull() }.forEach { id ->
                         log("- undo $id: ${container.toolExecutor.undo(id)}")
@@ -82,23 +76,8 @@ class ModelProbeReceiver : BroadcastReceiver() {
                         chatId = intent.getLongExtra("chat", -1L).takeIf { it > 0 },
                         mode = com.local.assistant.hybrid.ChatMode.of(intent.getStringExtra("chatmode")) ?: com.local.assistant.hybrid.ChatMode.CLOUD,
                     )
-                    // A model file for the engine bench, fetched by the phone itself (adb pushes
-                    // ~3 MB/s over wireless debugging): --es url … --es name x.litertlm [--es sha256 …]
-                    "fetch" -> EngineBench.fetch(
-                        url = intent.getStringExtra("url") ?: error("No url"),
-                        into = File(context.filesDir, "bench/${intent.getStringExtra("name") ?: error("No name")}"),
-                        sha256 = intent.getStringExtra("sha256"),
-                        log = ::log,
-                    )
-                    "engine" -> EngineBench(context, container, ::log).run(
-                        modelPath = intent.getStringExtra("model") ?: container.settings.modelPath ?: error("No model file"),
-                        backendName = intent.getStringExtra("backend") ?: "gpu",
-                        mtp = intent.getBooleanExtra("mtp", false),
-                        contextTokens = intent.getIntExtra("ctx", 4096),
-                        rounds = intent.getIntExtra("rounds", 2),
-                    )
-                    "voice" -> VoiceBench(context, container.llmBackend, ::log).run(download = intent.getBooleanExtra("download", false))
-                    else -> ModelProbe(context, container.llmBackend, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
+                    "voice" -> VoiceBench(context, ::log).run(download = intent.getBooleanExtra("download", false))
+                    else -> ModelProbe(context, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
                 }
             } catch (e: Throwable) {
                 log("PROBE FAILED: ${e.javaClass.simpleName}: ${e.message}")
@@ -110,38 +89,6 @@ class ModelProbeReceiver : BroadcastReceiver() {
         }
     }
 
-    /**
-     * Runs [block] with the app's chat model swapped for [model] and [backend], when given, through
-     * [com.local.assistant.llm.LlmService.bench]: in memory only, so the app's settings stay as
-     * they were even if the process dies mid-run. The NPU runs at 4,096 tokens, the window the
-     * uncompiled E2B file's masks are built for; at the app's 8K it loaded and never answered.
-     */
-    private suspend fun withModel(
-        context: Context,
-        container: com.local.assistant.AppContainer,
-        model: String?,
-        backend: String?,
-        log: (String) -> Unit,
-        block: suspend () -> Unit,
-    ) {
-        if (model == null && backend == null) return block()
-        val npu = backend == "npu"
-        val libs = context.applicationInfo.nativeLibraryDir
-        container.llmService.unload()
-        container.llmService.bench = com.local.assistant.llm.LlmService.Bench(
-            modelPath = model,
-            backend = if (npu) ({ com.google.ai.edge.litertlm.Backend.NPU(nativeLibraryDir = libs) }) else null,
-            contextTokens = if (npu) 4096 else null,
-        )
-        log("Gemma runs on ${File(model ?: container.settings.modelPath.orEmpty()).name}, ${backend ?: "the usual backend"}, for this run")
-        try {
-            block()
-        } finally {
-            container.llmService.unload()
-            container.llmService.bench = null
-        }
-    }
-
     companion object {
         const val TAG = "ModelProbe"
     }
@@ -149,7 +96,6 @@ class ModelProbeReceiver : BroadcastReceiver() {
 
 private class ModelProbe(
     private val context: Context,
-    private val gemma: LlmBackend,
     private val persona: String,
     private val log: (String) -> Unit,
     /** Only these chat cases, and no one-shot ones; all when null. */
@@ -195,22 +141,13 @@ private class ModelProbe(
             ?: found.firstOrNull { it.third?.available == true }
         log("")
 
-        if (only != "gemma") {
-            if (chosen == null) {
-                log("No Nano is available on this phone; nothing to compare.")
-            } else {
-                val (name, nano, report) = chosen
-                log("## Gemini Nano ($name: ${report?.baseModel})")
-                tokenCount(nano)
-                runBackend("nano", nano)
-            }
-        }
-        if (only != "nano") {
-            log("## Gemma 4 E4B (LiteRT-LM)")
-            val loading = SystemClock.elapsedRealtime()
-            val ready = gemma.ensureReady()
-            log("Engine ready=$ready in ${SystemClock.elapsedRealtime() - loading} ms; ${gemma.capabilities}")
-            if (ready) runBackend("gemma", gemma)
+        if (chosen == null) {
+            log("No Nano is available on this phone; nothing to run.")
+        } else {
+            val (name, nano, report) = chosen
+            log("## Gemini Nano ($name: ${report?.baseModel})")
+            tokenCount(nano)
+            runBackend("nano", nano)
         }
     }
 

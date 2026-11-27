@@ -88,7 +88,7 @@ class Extractor(
      * parse. Unconstrained on purpose: LiteRT-LM 0.17.1's JSON-schema decoding degraded this
      * model's output and then failed in the runtime ("compute_mask() called after stop") when
      * measured on the phone (MemoryEvalTest). Null when the model had to be given back to the
-     * user, or there was none (Gemma not loading, Nano not answering): the batch waits. An empty
+     * user, or there was none (Nano not answering): the batch waits. An empty
      * list when it found nothing (or never made sense of it).
      */
     private suspend fun extract(batch: List<ExtractionInput>): List<ExtractedItem>? {

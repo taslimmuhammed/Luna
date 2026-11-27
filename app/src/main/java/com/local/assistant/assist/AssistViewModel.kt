@@ -13,7 +13,7 @@ import com.local.assistant.data.db.Role
 import com.local.assistant.data.prefs.SettingsStore
 import com.local.assistant.data.repo.ChatRepository
 import com.local.assistant.device.PermissionBroker
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.EngineState
 import com.local.assistant.media.AttachmentStore
 import com.local.assistant.media.AudioRecorder
 import com.local.assistant.media.Recording
@@ -59,7 +59,8 @@ import kotlinx.coroutines.launch
 class AssistViewModel(
     private val sender: ChatSender,
     private val repository: ChatRepository,
-    private val llm: LlmService,
+    /** The phone's model, Gemini Nano. */
+    private val nano: com.local.assistant.llm.NanoBackend,
     private val conversations: ConversationManager,
     private val tools: ToolExecutor,
     private val clockAlarms: SystemAlarms,
@@ -78,8 +79,6 @@ class AssistViewModel(
     private val onLockScreen: () -> Boolean = { false },
     /** Writes what is said down as it's said; nothing when the phone can't. */
     private val transcriber: com.local.assistant.voice.Transcriber? = null,
-    /** Local chats' model: Gemini Nano where it answers, Gemma otherwise. */
-    private val local: com.local.assistant.llm.NanoFirstBackend? = null,
     /** The screenshot of the screen the overlay was opened over, if Android gave one ([ScreenCapture]). */
     private val screen: () -> String? = { null },
     /** The overlay is gone: [screen] is forgotten, once no reply is still using it. */
@@ -102,12 +101,8 @@ class AssistViewModel(
     /** A tool waiting on a permission dialog, e.g. contacts for "call amma". */
     val permissionRequests: SharedFlow<PermissionBroker.Request> = permissions.requests
 
-    /** Gemini Nano answers here ([com.local.assistant.llm.NanoFirstBackend.answersOnPhone]): Gemma isn't loaded for it. */
-    private val onPhone = MutableStateFlow(false)
-
-    /** The model that answers, as the panel shows it: Nano's ready at once, Gemma's as it loads. */
-    val engineState: StateFlow<LlmService.State> = combine(llm.state, onPhone) { state, phone -> local?.shownState(state, phone) ?: state }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, llm.state.value)
+    /** The model that answers, Gemini Nano, as the panel shows it. */
+    val engineState: StateFlow<EngineState> = nano.state
 
     private val _chatId = MutableStateFlow<Long?>(null)
 
@@ -196,12 +191,7 @@ class AssistViewModel(
     private var closed = false
 
     init {
-        // Gemma loads only when Nano won't answer: no Nano, or Nano resting. Over the lock screen too.
-        viewModelScope.launch {
-            val phone = local?.answersOnPhone() == true
-            onPhone.value = phone
-            if (!phone) llm.warmUp()
-        }
+        viewModelScope.launch { nano.answersOnPhone() }
         // The first message here always starts a new chat, whose conversation has to read the
         // whole system prompt first (3.4 s on the phone, 6 s just after the model loads). Do it
         // now, while the user is still talking; the first message then takes it over. Not on the
@@ -239,23 +229,18 @@ class AssistViewModel(
 
     /**
      * Whether the overlay should start listening as it opens: once, and only when what is said
-     * can be heard (unknown for Gemma until it has loaded, and the app's model does). False means
-     * it opens ready to type.
+     * can be written down. False means it opens ready to type.
      */
     fun claimAutoStart(): Boolean {
         if (autoStarted) return false
         autoStarted = true
-        if (settings.modelPath == null && !onPhone.value) return false
         val hears = hearsAudio()
         if (!hears) _input.value = Input.TEXT
         return hears
     }
 
-    /**
-     * A voice question can be asked: Nano can't hear, so it needs the words written down; Gemma
-     * takes the recording — or hasn't loaded yet to say, and the app's model does.
-     */
-    fun hearsAudio(): Boolean = if (onPhone.value) transcriber?.available == true else llm.modalities.value?.audio != false
+    /** A voice question can be asked: Nano can't hear, so it needs the words written down. */
+    fun hearsAudio(): Boolean = transcriber?.available == true
 
     /** Caller holds RECORD_AUDIO. */
     fun startListening() {
@@ -505,7 +490,7 @@ class AssistViewModel(
                 AssistViewModel(
                     sender = container.chatSender,
                     repository = container.chatRepository,
-                    llm = container.llmService,
+                    nano = container.chatBackend,
                     conversations = container.conversations,
                     tools = container.toolExecutor,
                     clockAlarms = container.clockAlarms,
@@ -518,7 +503,6 @@ class AssistViewModel(
                     sensitive = container.sensitiveLock,
                     onLockScreen = onLockScreen,
                     transcriber = container.transcriber,
-                    local = container.chatBackend,
                     screen = ScreenCapture::current,
                     // A reply may still be sending it on (the overlay closes as WhatsApp opens).
                     releaseScreen = { path ->

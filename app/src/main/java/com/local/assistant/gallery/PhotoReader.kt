@@ -28,9 +28,9 @@ import kotlinx.coroutines.CancellationException
  * not given; the reply says what was seen instead. (The credit card came out as 12 digits of its
  * 16, the same way five times out of five.)
  *
- * Read on the chat's model ([com.local.assistant.llm.NanoFirstBackend]): Gemini Nano while the
- * app is in front, Gemma otherwise. The measures above are Gemma's; on Nano a number that fails
- * its check is held back the same way. Nano keeps the photo in the conversation, so the second
+ * Read on the chat's model, Gemini Nano ([com.local.assistant.llm.NanoBackend]). The measures
+ * above were Gemma 4's, the model before it; on Nano a number that fails its check is held back
+ * the same way. Nano keeps the photo in the conversation, so the second
  * question looks at it again too.
  *
  * The chat's live conversation is closed for this ([ModelAccess.withModelFree]): never two at

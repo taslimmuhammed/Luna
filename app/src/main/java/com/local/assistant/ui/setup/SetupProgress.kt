@@ -4,11 +4,9 @@ import com.local.assistant.gallery.GalleryIndex
 import com.local.assistant.gallery.GalleryModel
 import com.local.assistant.gallery.IndexService
 import com.local.assistant.gallery.faces.FaceIndex
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.EngineState
 import com.local.assistant.model.InstalledModel
-import com.local.assistant.model.ModelCatalog
 import com.local.assistant.model.Transfer
-import com.local.assistant.model.TransferKind
 import com.local.assistant.model.formatBytes
 import com.local.assistant.voice.VoicePack
 import com.local.assistant.voice.VoicePackInstaller
@@ -16,19 +14,13 @@ import java.io.File
 import java.text.NumberFormat
 
 /**
- * Everything a first setup does, as one value: the three downloads, the chat model's first load,
- * and the indexing that follows (photos, the faces in them, earlier chats). [SetupScreen] lists
- * it step by step, and the chat's pill names the one under way ([pill]).
+ * Everything a first setup does, as one value: whether the phone has Gemini Nano, the two
+ * downloads, and the indexing that follows (photos, the faces in them, earlier chats).
+ * [SetupScreen] lists it step by step, and the chat's pill names the one under way ([pill]).
  */
 internal data class SetupState(
-    val chatModel: InstalledModel?,
-    val chatTransfer: Transfer?,
-    val chatError: String?,
-    /** Bytes of an earlier download that a new one picks up from. */
-    val chatPartialBytes: Long,
-    val engine: LlmService.State,
-    /** The new model is loading and reading the first chat's prompt (`AppContainer.prepareFirstChat`). */
-    val preparing: Boolean,
+    /** Gemini Nano, the chat model, which Android keeps ([com.local.assistant.llm.NanoBackend.state]). */
+    val engine: EngineState,
     val photoModel: InstalledModel?,
     val photoTransfer: Transfer?,
     val photoError: String?,
@@ -48,13 +40,13 @@ internal data class SetupState(
     val voicePartialBytes: Long = 0,
 )
 
-internal enum class StepKind { CHAT_MODEL, READY, PHOTO_MODEL, VOICE, PHOTOS, PEOPLE, MEMORY }
+internal enum class StepKind { CHAT_MODEL, PHOTO_MODEL, VOICE, PHOTOS, PEOPLE, MEMORY }
 
 internal enum class StepStatus {
     /** Waiting its turn: after another step, or for something to arrive. */
     WAITING,
 
-    /** Needs the user's tap to begin: the chat model's download. */
+    /** Needs the user's tap to begin: the photo model's download. */
     START,
     RUNNING,
 
@@ -98,7 +90,6 @@ internal fun duration(seconds: Long): String = when {
 
 internal fun SetupState.steps(): List<SetupStep> = buildList {
     add(chatModelStep())
-    add(readyStep())
     add(photoModelStep())
     add(voiceStep())
     if (photosAllowed) add(photosStep())
@@ -106,51 +97,15 @@ internal fun SetupState.steps(): List<SetupStep> = buildList {
     memoryStep()?.let(::add)
 }
 
+/** Nothing to download: Android keeps Nano (AICore), or the phone doesn't have it. */
 private fun SetupState.chatModelStep(): SetupStep {
-    val title = "Chat model · ${ModelCatalog.DISPLAY_NAME}"
-    return when {
-        chatModel != null -> SetupStep(StepKind.CHAT_MODEL, title, "Here · ${formatBytes(chatModel.sizeBytes)}, runs with no internet", StepStatus.DONE)
-        chatTransfer != null -> SetupStep(
-            StepKind.CHAT_MODEL,
-            title,
-            if (chatTransfer.kind == TransferKind.IMPORT) "Copying · ${transferDetail(chatTransfer)}" else transferDetail(chatTransfer),
-            StepStatus.RUNNING,
-            chatTransfer.fraction.takeIf { chatTransfer.bytesTotal > 0 && !chatTransfer.checking },
-            // All of it is here while it's checked.
-            stop = when {
-                chatTransfer.checking -> null
-                chatTransfer.kind == TransferKind.IMPORT -> "Cancel"
-                else -> "Pause"
-            },
-        )
-        chatError != null -> SetupStep(StepKind.CHAT_MODEL, title, chatError, StepStatus.FAILED)
-        chatPartialBytes > 0 -> SetupStep(
-            StepKind.CHAT_MODEL,
-            title,
-            if (paused) {
-                "Paused · ${formatBytes(chatPartialBytes)} of ${formatBytes(ModelCatalog.SIZE_BYTES)}; Resume picks up from there"
-            } else {
-                "${formatBytes(chatPartialBytes)} of ${formatBytes(ModelCatalog.SIZE_BYTES)} already here; the rest picks up from there"
-            },
-            StepStatus.START,
-            (chatPartialBytes.toFloat() / ModelCatalog.SIZE_BYTES).coerceIn(0f, 1f),
-        )
-        else -> SetupStep(StepKind.CHAT_MODEL, title, "${formatBytes(ModelCatalog.SIZE_BYTES)}, once. Best on Wi-Fi.", StepStatus.START)
-    }
-}
-
-private fun SetupState.readyStep(): SetupStep {
-    val title = "Getting it ready"
-    return when {
-        chatModel == null -> SetupStep(StepKind.READY, title, "Loads into memory and reads its instructions, about 15 s", StepStatus.WAITING)
-        engine is LlmService.State.Failed -> SetupStep(StepKind.READY, title, engine.message, StepStatus.FAILED)
-        preparing -> SetupStep(
-            StepKind.READY,
-            title,
-            if (engine is LlmService.State.Ready) "Reading its instructions…" else "Loading the model into memory…",
-            StepStatus.RUNNING,
-        )
-        else -> SetupStep(StepKind.READY, title, "Ready to chat", StepStatus.DONE)
+    val title = "Chat model · Gemini Nano"
+    return when (engine) {
+        is EngineState.Ready -> SetupStep(StepKind.CHAT_MODEL, title, "On this phone, kept up to date by Android · runs with no internet", StepStatus.DONE)
+        is EngineState.Loading -> SetupStep(StepKind.CHAT_MODEL, title, "Android is downloading it", StepStatus.RUNNING)
+        EngineState.Idle -> SetupStep(StepKind.CHAT_MODEL, title, "Checking the phone…", StepStatus.RUNNING)
+        EngineState.NoModel -> SetupStep(StepKind.CHAT_MODEL, title, "Not on this phone: chats can run in Cloud mode", StepStatus.FAILED)
+        is EngineState.Failed -> SetupStep(StepKind.CHAT_MODEL, title, engine.message, StepStatus.FAILED)
     }
 }
 
@@ -164,10 +119,19 @@ private fun SetupState.photoModelStep(): SetupStep {
             transferDetail(photoTransfer),
             StepStatus.RUNNING,
             photoTransfer.fraction.takeIf { photoTransfer.bytesTotal > 0 && !photoTransfer.checking },
+            // All of it is here while it's checked.
+            stop = "Pause".takeIf { !photoTransfer.checking },
         )
         photoError != null -> SetupStep(StepKind.PHOTO_MODEL, title, photoError, StepStatus.FAILED)
         paused && photoPartialBytes > 0 -> pausedStep(StepKind.PHOTO_MODEL, title, photoPartialBytes, GalleryModel.SIZE_BYTES)
-        else -> SetupStep(StepKind.PHOTO_MODEL, title, "${formatBytes(GalleryModel.SIZE_BYTES)}, downloads after the chat model", StepStatus.WAITING)
+        photoPartialBytes > 0 -> SetupStep(
+            StepKind.PHOTO_MODEL,
+            title,
+            "${formatBytes(photoPartialBytes)} of ${formatBytes(GalleryModel.SIZE_BYTES)} already here; the rest picks up from there",
+            StepStatus.START,
+            (photoPartialBytes.toFloat() / GalleryModel.SIZE_BYTES).coerceIn(0f, 1f),
+        )
+        else -> SetupStep(StepKind.PHOTO_MODEL, title, "${formatBytes(GalleryModel.SIZE_BYTES)}, once, then the natural voice. Best on Wi-Fi.", StepStatus.START)
     }
 }
 
@@ -244,13 +208,13 @@ private fun SetupState.memoryStep(): SetupStep? {
 }
 
 /**
- * The chat's note while setup carries on in the background, or null: the downloads after the
- * chat model, and indexing when there's enough of it to notice ([IndexService.BACKLOG], as for
- * its notification). The nightly pass over a few new photos isn't worth one.
+ * The chat's note while setup carries on in the background, or null: the downloads, and
+ * indexing when there's enough of it to notice ([IndexService.BACKLOG], as for its
+ * notification). The nightly pass over a few new photos isn't worth one.
  */
 internal fun SetupState.pill(): SetupPill? {
-    // Paused after the chat model was in: the way to Resume is the setup page the pill opens.
-    if (paused && chatModel != null && (photoPartialBytes > 0 || voicePartialBytes > 0)) return SetupPill("Downloads paused · tap to resume", null)
+    // Paused: the way to Resume is the setup page the pill opens.
+    if (paused && (photoPartialBytes > 0 || voicePartialBytes > 0)) return SetupPill("Downloads paused · tap to resume", null)
     photoTransfer?.let { return SetupPill("Downloading photo search · ${percent(it)}", it.fraction.takeIf { _ -> it.bytesTotal > 0 }) }
     when (voiceProgress) {
         is VoicePackInstaller.Progress.Downloading ->

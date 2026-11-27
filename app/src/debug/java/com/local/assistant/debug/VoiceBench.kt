@@ -22,15 +22,13 @@ import java.util.Locale
 
 /**
  * Debug builds only: the user's own voice messages, written down again by AICore's speech
- * recognition (basic and advanced) and by Gemma hearing the recording, beside what the phone's
- * recogniser wrote. The recordings and the phone's words come from files/voice-cases.tsv
+ * recognition (basic and advanced), beside what the phone's recogniser wrote. The recordings and the phone's words come from files/voice-cases.tsv
  * (path, tab, words), one a line.
  *
  *   adb shell am broadcast -a com.local.assistant.debug.MODEL_PROBE -p com.local.assistant.dev --es mode voice [--ez download true]
  */
 class VoiceBench(
     private val context: Context,
-    private val gemma: LlmBackend,
     private val log: (String) -> Unit,
 ) {
     suspend fun run(download: Boolean) {
@@ -63,7 +61,6 @@ class VoiceBench(
             if (status == FeatureStatus.AVAILABLE) name to recogniser else null
         }
         log("")
-        gemma.ensureReady()
 
         for ((file, phone) in cases) {
             log("## ${file.name}")
@@ -90,32 +87,7 @@ class VoiceBench(
                 }
                 log("- $name (${SystemClock.elapsedRealtime() - start} ms): ${heard.getOrElse { "ERROR ${it.javaClass.simpleName}: ${it.message}" }}")
             }
-            val start = SystemClock.elapsedRealtime()
-            val byGemma = runCatching { withTimeout(60_000) { gemmaHears(file, phone) } }
-            log("- gemma (${SystemClock.elapsedRealtime() - start} ms): ${byGemma.getOrElse { "ERROR ${it.javaClass.simpleName}: ${it.message}" }}")
             log("")
-        }
-    }
-
-    /** Gemma hears the recording with the phone's words beside it, and writes what was said. */
-    private suspend fun gemmaHears(file: File, phone: String): String {
-        val session = gemma.openChat(
-            ChatSpec(
-                systemPrefix = "You write down voice messages exactly as spoken. The speaker is in Kerala, India, and uses Malayalam names (Umma, Achan, Shiyas).",
-                history = emptyList(),
-                sampling = Sampling.BACKGROUND,
-                maxOutputTokens = 96,
-            ),
-        )
-        try {
-            val out = StringBuilder()
-            session.send(
-                "The phone's speech recogniser wrote this recording as: \"$phone\". Listen to the recording and write what was said, word for word, fixing any name or number it misheard. Write only the words.",
-                PromptAttachment(file.path, AttachmentKind.AUDIO),
-            ).collect { if (it is GenEvent.TextDelta) out.append(it.text) }
-            return out.toString().trim()
-        } finally {
-            session.close()
         }
     }
 }

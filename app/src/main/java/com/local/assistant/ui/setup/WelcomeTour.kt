@@ -125,7 +125,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.local.assistant.model.ModelCatalog
+import com.local.assistant.gallery.GalleryModel
 import com.local.assistant.ui.theme.AppColors
 import com.local.assistant.ui.theme.Glass
 import com.local.assistant.ui.theme.GlassMark
@@ -878,7 +878,7 @@ private val TourPages = listOf(
     TourPage(
         SceneKind.WELCOME, "Welcome", Icons.Outlined.WavingHand, Glass.Ink[0],
         "Meet your private assistant",
-        "Local Assistant runs Google's Gemma 4 right on this phone. It talks, listens, remembers you and gets things done, " +
+        "Local Assistant runs Google's Gemini Nano right on this phone. It talks, listens, remembers you and gets things done, " +
             "and nothing you say leaves the phone for it to think.",
         listOf(
             TourPoint(Icons.Outlined.PhoneAndroid, "Runs on the phone, even with no signal"),
@@ -981,10 +981,10 @@ private val TourPages = listOf(
     ),
 )
 
-/** On a first run the last page says what comes next, so the wait for the download isn't a surprise. */
+/** On a first run the last page says what comes next, so the download isn't a surprise. */
 private val FIRST_RUN_NEXT =
-    "Next: a few optional details about you, what it may use on the phone and why, then the model download " +
-        "(%.1f GB, best on Wi-Fi).".format(Locale.US, ModelCatalog.SIZE_BYTES / 1e9)
+    "Next: a few optional details about you, what it may use on the phone and why, then photo search's download " +
+        "(%.0f MB, best on Wi-Fi).".format(Locale.US, GalleryModel.SIZE_BYTES / 1e6)
 
 private val PhotoTones = listOf(
     listOf(Color(0xFF8EC5FC), Color(0xFFF6D5A8)),

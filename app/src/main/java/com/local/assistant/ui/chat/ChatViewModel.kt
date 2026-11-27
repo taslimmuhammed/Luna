@@ -22,7 +22,8 @@ import com.local.assistant.data.db.Role
 import com.local.assistant.data.prefs.SettingsStore
 import com.local.assistant.data.repo.ChatRepository
 import com.local.assistant.device.PermissionBroker
-import com.local.assistant.llm.LlmService
+import com.local.assistant.llm.ContextUsage
+import com.local.assistant.llm.EngineState
 import com.local.assistant.media.AttachmentStore
 import com.local.assistant.media.AudioRecorder
 import com.local.assistant.media.Recording
@@ -56,7 +57,8 @@ import kotlinx.coroutines.launch
 
 class ChatViewModel(
     private val repository: ChatRepository,
-    private val llm: LlmService,
+    /** The phone's model, Gemini Nano, for Local chats. */
+    private val nano: com.local.assistant.llm.NanoBackend,
     private val conversations: ConversationManager,
     private val turns: TurnRunner,
     private val sender: ChatSender,
@@ -81,8 +83,6 @@ class ChatViewModel(
     private val onPhoneKillsAnswered: () -> Unit = {},
     /** Cloud mode is in this build and on ([com.local.assistant.hybrid.HybridSetup.cloudAvailable]). */
     private val cloudAvailable: () -> Boolean = { false },
-    /** Local chats' model: Gemini Nano where it answers, Gemma otherwise. */
-    private val local: com.local.assistant.llm.NanoFirstBackend? = null,
     /** The mode a new chat starts in, as it would now ([com.local.assistant.AppContainer.newChatsMode]). */
     private val newChatsMode: () -> ChatMode = { ChatMode.LOCAL },
     /** Auto's questions held for the user's say-so ([AskConfirm]); none without the cloud. */
@@ -250,17 +250,16 @@ class ChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    /** Gemini Nano answers Local chats here ([com.local.assistant.llm.NanoFirstBackend.answersOnPhone]). */
-    private val onPhone = MutableStateFlow(false)
+    /** Gemini Nano as the screen shows it: ready, being fetched by AICore, or not on this phone. */
+    val engineState: StateFlow<EngineState> = nano.state
 
-    /** The chat's model as the screen shows it: Nano's ready at once, Gemma's as it loads. */
-    val engineState: StateFlow<LlmService.State> = combine(llm.state, onPhone) { state, phone -> local?.shownState(state, phone) ?: state }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, llm.state.value)
+    /** Gemini Nano answers Local chats here ([com.local.assistant.llm.NanoBackend.answersOnPhone]). */
+    private val onPhone: StateFlow<Boolean> = nano.state.map { it is EngineState.Ready }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, nano.state.value is EngineState.Ready)
 
-    /** Asks again whether Nano answers: AICore may have finished downloading it, or stopped resting it. */
+    /** Asks whether Nano answers, the first time: AICore may also have finished downloading it. */
     private fun checkOnPhone() {
-        val backend = local ?: return
-        viewModelScope.launch { onPhone.value = backend.answersOnPhone() }
+        viewModelScope.launch { nano.answersOnPhone() }
     }
 
     /** A reply is being read aloud: one to a voice message, or one from its speaker button. */
@@ -290,16 +289,12 @@ class ChatViewModel(
             }
         }
 
-        // The chat opens at once and the model loads behind it; a message sent before it is ready
-        // waits for it. Also covers a model installed just now, which the app's start didn't see.
-        // Gemma still loads behind a Nano chat: it reads found photos and documents.
-        llm.warmUp()
         checkOnPhone()
 
         // What is on screen decides which conversation is made ready: a new chat's at once, once
         // the model is ready (ConversationManager.showing).
         viewModelScope.launch {
-            combine(_activeChatId, engineState.map { it is LlmService.State.Ready }.distinctUntilChanged(), ::Pair)
+            combine(_activeChatId, engineState.map { it is EngineState.Ready }.distinctUntilChanged(), ::Pair)
                 .collect { (chatId, ready) -> conversations.showing(chatId, ready) }
         }
 
@@ -379,11 +374,13 @@ class ChatViewModel(
         if (_readingAloud.value != null) stopSpeaking()
     }
 
-    /** After the model failed to start: from the banner that says so. */
-    fun retryLoad() = llm.retryLoad()
+    /** After AICore couldn't be reached: from the banner that says so. */
+    fun retryLoad() {
+        viewModelScope.launch { nano.recheck() }
+    }
 
     /** Real context consumption reported by the runtime, for the indicator above the composer. */
-    val contextUsage: StateFlow<LlmService.ContextUsage?> = combine(conversations.contextUsage, _activeChatId) { usage, chatId ->
+    val contextUsage: StateFlow<ContextUsage?> = combine(conversations.contextUsage, _activeChatId) { usage, chatId ->
         usage?.takeIf { it.chatId == null || it.chatId == chatId }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -396,21 +393,15 @@ class ChatViewModel(
     /** How many older turns fell out of the context window for the active chat. */
     val droppedFromContext: StateFlow<Int> = conversations.droppedFromContext
 
-    /**
-     * Drives whether the composer offers the image and mic buttons at all. Nano takes a photo
-     * (one a message) whether or not Gemma is loaded.
-     */
-    val supportsImages: StateFlow<Boolean> = combine(llm.modalities, onPhone) { modalities, phone -> phone || modalities?.vision == true }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    /** Drives whether the composer offers the image button: Nano takes a photo, one a message. */
+    val supportsImages: StateFlow<Boolean> = onPhone
 
     /**
      * Nano can't hear: a voice message reaches it as words, so the mic is there while the phone
-     * can write them down (ML Kit's speech recognition or the phone's recogniser). Gemma hears
-     * the recording itself.
+     * can write them down (ML Kit's speech recognition or the phone's recogniser).
      */
-    val supportsAudio: StateFlow<Boolean> = combine(llm.modalities, onPhone) { modalities, phone ->
-        if (phone) transcriber?.available == true else modalities?.audio == true
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    val supportsAudio: StateFlow<Boolean> = onPhone.map { phone -> phone && transcriber?.available == true }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _pendingAttachment = MutableStateFlow<PendingAttachment?>(null)
     val pendingAttachment: StateFlow<PendingAttachment?> = _pendingAttachment.asStateFlow()
@@ -455,7 +446,7 @@ class ChatViewModel(
     /** The chat screen came into view again (back from the panel, Settings or another app). */
     fun onScreenShown() {
         checkOnPhone()
-        conversations.showing(_activeChatId.value, engineState.value is LlmService.State.Ready)
+        conversations.showing(_activeChatId.value, engineState.value is EngineState.Ready)
     }
 
     fun deleteChat(chatId: Long) {
@@ -647,7 +638,7 @@ class ChatViewModel(
             initializer {
                 ChatViewModel(
                     repository = container.chatRepository,
-                    llm = container.llmService,
+                    nano = container.chatBackend,
                     conversations = container.conversations,
                     turns = container.turnRunner,
                     sender = container.chatSender,
@@ -666,7 +657,6 @@ class ChatViewModel(
                     phoneKills = container.phoneKills,
                     onPhoneKillsAnswered = container::toldAboutPhoneKills,
                     cloudAvailable = { container.hybridSetup.cloudAvailable },
-                    local = container.chatBackend,
                     newChatsMode = container::newChatsMode,
                     askConfirm = container.askConfirm,
                     dailyAsks = { container.hybridSetup.autoDailyAsks },

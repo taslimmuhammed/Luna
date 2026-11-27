@@ -14,23 +14,19 @@ import java.nio.ByteOrder
  * loaded at every launch, a wrong file imported once crashed the app at every launch after
  * (seen on the emulator, 2026-09-30). So a wrong file is refused here, with a message.
  *
- * The check is the start of the layout [ModelPrecision] reads: "LITERTLM", then at 24 where the
- * header ends, which has to lie inside the file. Every model the app uses has it: Gemma 4 E4B,
- * EmbeddingGemma 2 and Granite.
+ * The check is the start of the layout [LiteRtLmHeader] reads: "LITERTLM", then at 24 where the
+ * header ends, which has to lie inside the file. Every model the app uses has it: EmbeddingGemma 2
+ * and Granite.
  *
- * A LiteRT-LM file of the wrong kind is just as fatal: handed an embedding model as the chat
- * model, the runtime logs "Section not found" and aborts ("bad_optional_access was thrown in
- * -fno-exceptions mode"), in any build (emulator, 2026-09-30). An embedding model is an easy file
- * to pick by mistake when importing the chat model. [problem] therefore also checks the file has
- * the section its [Kind] runs on.
+ * A LiteRT-LM file of the wrong kind is just as fatal: handed a model without the section it is
+ * run for, the runtime logs "Section not found" and aborts ("bad_optional_access was thrown in
+ * -fno-exceptions mode"), in any build (emulator, 2026-09-30). [problem] therefore also checks
+ * the file has the sections its [Kind] runs on.
  */
 object ModelFormat {
 
     /** What a file is to be used as, and the sections (`model_type`) that have to be in it. */
     enum class Kind(val wrongKind: String, vararg val sections: String) {
-        /** Gemma 4 E4B's text decoder; embedding models have none. */
-        CHAT("That's not a chat model: it can't write replies. Pick the Gemma model file.", "tf_lite_prefill_decode"),
-
         /** An imported text embedder's encoder (Granite, say); chat models have none. */
         EMBEDDER("That's not a memory-search (embedding) model.", "tf_lite_text_encoder"),
 
@@ -41,7 +37,7 @@ object ModelFormat {
     /** Why [file] can't be used as [kind], or null when it can. */
     fun problem(file: File, kind: Kind): String? {
         if (!isLiteRtLm(file)) return NOT_A_MODEL
-        val sections = ModelPrecision.sectionTypes(file) ?: return NOT_A_MODEL
+        val sections = LiteRtLmHeader.sectionTypes(file) ?: return NOT_A_MODEL
         return if (sections.containsAll(kind.sections.asList())) null else kind.wrongKind
     }
 

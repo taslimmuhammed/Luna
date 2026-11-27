@@ -29,7 +29,7 @@ data class ReplyReport(
     val note: String,
     val question: String,
     val reply: String,
-    /** The app's version and the model's file, e.g. "0.3.0 (5), gemma-4-E4B-it.litertlm". */
+    /** The app's version and the model's file, e.g. "0.3.0 (5), Gemini Nano". */
     val version: String,
 )
 

@@ -6,6 +6,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -30,6 +33,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,10 +44,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.local.assistant.llm.LlmService
-import com.local.assistant.model.InstalledModel
-import com.local.assistant.model.ModelCatalog
-import com.local.assistant.model.ModelManager
+import com.local.assistant.llm.EngineState
+import com.local.assistant.llm.NanoBackend
+import com.local.assistant.model.OldChatModel
 import com.local.assistant.model.Transfer
 import com.local.assistant.model.TransferKind
 import com.local.assistant.model.formatBytes
@@ -53,26 +56,24 @@ import com.local.assistant.ui.theme.GlassIconButton
 import kotlinx.coroutines.launch
 
 /**
- * Model management: download the published file, import one already on the device, or remove
- * what is installed. Doubles as the first-run screen when nothing is installed yet.
+ * The chat model's page in Settings: Gemini Nano, kept by Android (AICore), with memory search's
+ * model below it, and the old Gemma file while it's still on the phone, to delete.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ModelScreen(
-    modelManager: ModelManager,
-    llmService: LlmService,
+    nano: NanoBackend,
+    oldModel: OldChatModel,
     onBack: (() -> Unit)?,
     memorySearch: MemorySearchControls? = null,
 ) {
-    val installed by modelManager.installed.collectAsStateWithLifecycle()
-    val transfer by modelManager.transfer.collectAsStateWithLifecycle()
-    val error by modelManager.error.collectAsStateWithLifecycle()
-    val engineState by llmService.state.collectAsStateWithLifecycle()
+    val engineState by nano.state.collectAsStateWithLifecycle()
+    val oldBytes by oldModel.bytes.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-
-    val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let(modelManager::importFrom) }
+    LaunchedEffect(Unit) {
+        nano.answersOnPhone()
+        oldModel.refresh()
+    }
 
     Scaffold(
         containerColor = AppColors.Background,
@@ -103,63 +104,118 @@ fun ModelScreen(
                 .padding(horizontal = 18.dp),
         ) {
             Text(
-                text = ModelCatalog.DISPLAY_NAME,
+                text = "Gemini Nano",
                 style = MaterialTheme.typography.titleMedium,
                 color = AppColors.TextPrimary,
                 modifier = Modifier.padding(top = 18.dp),
             )
             Text(
-                text = "Runs fully offline on this device. " +
-                    "About ${formatBytes(ModelCatalog.SIZE_BYTES)} of storage.",
+                text = "Google's model on the phone, kept up to date by Android. Local chats and the assistant " +
+                    "run on it with no internet, and nothing you say leaves the phone.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = AppColors.TextSecondary,
                 modifier = Modifier.padding(top = 6.dp),
             )
+            NanoStatus(engineState, onRetry = { scope.launch { nano.recheck() } })
 
-            when {
-                transfer != null -> TransferSection(
-                    transfer = transfer!!,
-                    onCancel = modelManager::cancel,
-                )
+            if (memorySearch != null) MemorySearchSection(memorySearch)
 
-                installed != null -> InstalledSection(
-                    installed = installed!!,
-                    engineState = engineState,
-                    onDelete = {
-                        scope.launch {
-                            llmService.unload()
-                            modelManager.deleteInstalled()
-                        }
-                    },
-                )
+            if (oldBytes > 0) OldModelSection(oldBytes, onDelete = { scope.launch { oldModel.delete() } })
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
 
-                else -> NotInstalledSection(
-                    resumableBytes = modelManager.partialBytes(),
-                    onDownload = modelManager::download,
-                    onImport = { picker.launch(arrayOf("*/*")) },
+@Composable
+private fun NanoStatus(engineState: EngineState, onRetry: () -> Unit) {
+    Column(Modifier.padding(top = 20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (engineState is EngineState.Loading || engineState == EngineState.Idle) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp).padding(end = 0.dp),
+                    strokeWidth = 2.dp,
+                    color = AppColors.TextSecondary,
                 )
+                Spacer(Modifier.width(8.dp))
             }
-
-            error?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AppColors.Danger,
-                    modifier = Modifier.padding(top = 20.dp),
-                )
-                TextButton(onClick = modelManager::clearError) { Text("Dismiss") }
-            }
-
-            // Only once there is a chat model: the first-run screen stays about the one thing needed.
-            if (installed != null && memorySearch != null) MemorySearchSection(memorySearch)
-
             Text(
-                text = "Importing copies the file into the app's private storage, so make sure " +
-                    "there is room for a second copy while the import runs.",
+                text = when (engineState) {
+                    is EngineState.Ready -> "On this phone · ${engineState.contextTokens / 1024}K window"
+                    is EngineState.Loading -> "Android is downloading it…"
+                    EngineState.Idle -> "Checking…"
+                    EngineState.NoModel -> "Not on this phone"
+                    is EngineState.Failed -> "Couldn't check"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.TextPrimary,
+            )
+        }
+        when (engineState) {
+            EngineState.NoModel -> Text(
+                text = "This phone doesn't have Gemini Nano, so local chats and the assistant can't run here. " +
+                    "Chats in Cloud mode still work.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = AppColors.TextSecondary,
-                modifier = Modifier.padding(top = 32.dp, bottom = 32.dp),
+                modifier = Modifier.padding(top = 6.dp),
             )
+            is EngineState.Failed -> {
+                Text(
+                    text = engineState.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppColors.Danger,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                TextButton(onClick = onRetry) { Text("Try again") }
+            }
+            else -> Unit
+        }
+    }
+}
+
+/** Gemma 4 E4B's file, from before Nano: what it takes, and a Delete that asks first. */
+@Composable
+private fun OldModelSection(bytes: Long, onDelete: () -> Unit) {
+    Column(Modifier.padding(top = 28.dp)) {
+        HorizontalDivider(color = AppColors.Border)
+        Text(
+            text = "Old chat model · ${OldChatModel.DISPLAY_NAME}",
+            style = MaterialTheme.typography.titleSmall,
+            color = AppColors.TextPrimary,
+            modifier = Modifier.padding(top = 20.dp),
+        )
+        Text(
+            text = "${formatBytes(bytes)} on this phone. Luna runs on Gemini Nano now and doesn't use it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.TextSecondary,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        var confirming by remember { mutableStateOf(false) }
+        if (confirming) {
+            Text(
+                text = "Delete the file? It can't be undone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.TextPrimary,
+                modifier = Modifier.padding(top = 16.dp),
+            )
+            Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { confirming = false; onDelete() },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger),
+                    shape = RoundedCornerShape(12.dp),
+                ) { Text("Delete") }
+                OutlinedButton(
+                    onClick = { confirming = false },
+                    shape = RoundedCornerShape(12.dp),
+                ) { Text("Keep") }
+            }
+        } else {
+            OutlinedButton(
+                onClick = { confirming = true },
+                modifier = Modifier.padding(top = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Text("Delete ${formatBytes(bytes)}", color = AppColors.Danger)
+            }
         }
     }
 }
@@ -219,132 +275,6 @@ internal fun TransferSection(transfer: Transfer, onCancel: () -> Unit) {
                 Text(if (transfer.kind == TransferKind.DOWNLOAD) "Pause" else "Cancel")
             }
         }
-    }
-}
-
-@Composable
-private fun InstalledSection(
-    installed: InstalledModel,
-    engineState: LlmService.State,
-    onDelete: () -> Unit,
-) {
-    Column(Modifier.padding(top = 28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (engineState is LlmService.State.Loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = AppColors.TextSecondary,
-                )
-            }
-            Text(
-                text = when (engineState) {
-                    is LlmService.State.Ready -> "Installed · running on ${engineState.backend} · ${engineState.contextTokens / 1024}K window"
-                    is LlmService.State.Loading -> "Installed · loading…"
-                    is LlmService.State.Failed -> "Installed · failed to load"
-                    else -> "Installed"
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.TextPrimary,
-                modifier = Modifier.padding(start = if (engineState is LlmService.State.Loading) 8.dp else 0.dp),
-            )
-        }
-        Text(
-            text = "${formatBytes(installed.sizeBytes)} · ${installed.file.name}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.TextSecondary,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-
-        (engineState as? LlmService.State.Failed)?.let {
-            Text(
-                text = it.message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.Danger,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-        }
-
-        var confirming by remember { mutableStateOf(false) }
-        if (confirming) {
-            Text(
-                text = "Delete the model file? You will need to download or import it again.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.TextPrimary,
-                modifier = Modifier.padding(top = 20.dp),
-            )
-            Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { confirming = false; onDelete() },
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger),
-                    shape = RoundedCornerShape(12.dp),
-                ) { Text("Delete") }
-                OutlinedButton(
-                    onClick = { confirming = false },
-                    shape = RoundedCornerShape(12.dp),
-                ) { Text("Keep") }
-            }
-        } else {
-            OutlinedButton(
-                onClick = { confirming = true },
-                modifier = Modifier.padding(top = 24.dp),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Text("Delete model", color = AppColors.Danger)
-            }
-        }
-    }
-}
-
-@Composable
-private fun NotInstalledSection(
-    resumableBytes: Long,
-    onDownload: () -> Unit,
-    onImport: () -> Unit,
-) {
-    Column(Modifier.padding(top = 28.dp)) {
-        if (resumableBytes > 0) {
-            Text(
-                text = "${formatBytes(resumableBytes)} already downloaded. " +
-                    "Downloading again resumes from there.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.TextSecondary,
-                modifier = Modifier.padding(bottom = 12.dp),
-            )
-        }
-        Button(
-            onClick = onDownload,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = AppColors.Accent,
-                contentColor = AppColors.OnAccent,
-            ),
-        ) {
-            Text(if (resumableBytes > 0) "Resume download" else "Download model")
-        }
-        Text(
-            text = "Photo search and the ${com.local.assistant.voice.VoicePack.KOKORO.title} voice download after it, " +
-                "${formatBytes(com.local.assistant.gallery.GalleryModel.FILE.sizeBytes + com.local.assistant.voice.VoicePack.KOKORO.archiveBytes)} more.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.TextSecondary,
-            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
-        )
-        OutlinedButton(
-            onClick = onImport,
-            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-            shape = RoundedCornerShape(12.dp),
-        ) {
-            Text("Load from device storage")
-        }
-        Text(
-            text = "Pick a ${ModelCatalog.FILE_EXTENSION} file you already have, " +
-                "for example one sideloaded over USB.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.TextSecondary,
-            textAlign = TextAlign.Start,
-            modifier = Modifier.padding(top = 8.dp),
-        )
     }
 }
 
