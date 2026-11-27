@@ -65,13 +65,11 @@ class ToolExecutor(
     private val archive: ArchiveSearch = ArchiveSearch { _, _ -> emptyList() },
     /** Memory is paused: nothing new is saved about the user until it is turned back on. */
     private val memoryPaused: () -> Boolean = { false },
-    /** Images kept for remember_image; none when not wired in. */
-    private val images: ImageNotes = NoImageNotes,
     /**
-     * remember_image saved a note with the details the model wrote in its call — past token
-     * 2,048, where it mis-copies digits — so the image is to be read again once the turn is over.
+     * Saved images, from before remember_image was taken out (26 Nov 2026: photo search covers
+     * the gallery): undoing an old save still deletes its image. None when not wired in.
      */
-    private val onImageSaved: (noteId: Long, userText: String) -> Unit = { _, _ -> },
+    private val images: ImageNotes = NoImageNotes,
     /** Calls, messages, timers, apps, phone settings and arithmetic; none when not wired in. */
     private val device: DeviceTools? = null,
     /** web_search; none when not wired in. */
@@ -218,7 +216,7 @@ class ToolExecutor(
      * [NumberGrounding]). What an image showed is left alone: its numbers were never the user's.
      */
     private fun grounded(call: ToolCall, userText: String): ToolCall {
-        if (userText.isBlank() || call.name == ToolCatalog.REMEMBER_IMAGE) return call
+        if (userText.isBlank()) return call
         val arguments = call.arguments.mapValues { (key, value) ->
             when {
                 value !is String -> value
@@ -338,11 +336,6 @@ class ToolExecutor(
             ToolCatalog.SEARCH_MEMORY -> searchMemory(args)
             ToolCatalog.FORGET -> forget(args)
             ToolCatalog.SET_ALARM -> if (place != null) placeAlarm(args, context, place) else setAlarm(args, context.userText)
-            ToolCatalog.REMEMBER_IMAGE -> if (memoryPaused()) {
-                throw ToolError("Memory is paused, so nothing was saved. Tell the user; they can turn memory back on in 'What I know about you'.")
-            } else {
-                rememberImage(args, context)
-            }
             // Not stopped by a pause: like a reminder, a note is something the user asked to have kept.
             ToolCatalog.EDIT_NOTE -> editNote(args, context)
             else -> throw ToolError("There is no tool called ${call.name}.")
@@ -812,27 +805,6 @@ class ToolExecutor(
             },
             undo = label?.let { UndoToken(previousFact = previous, writtenFact = fact) },
             changedPrefix = changedPrefix,
-        )
-    }
-
-    /**
-     * Keeps the image with the title and details the model gave. The details are what later
-     * questions are matched against; the image is attached again when one is, so the model can
-     * read what nobody wrote down.
-     */
-    private suspend fun rememberImage(args: Args, context: ToolContext): Applied {
-        val title = tidyTitle(args.required("title")).take(MAX_TITLE)
-        val details = args.text("details").orEmpty().take(MAX_DETAILS)
-        // With nothing sent, the screen the assistant was opened over: "remember this" over a ticket.
-        val image = images.findImage(context.chatId, context.userMessageId)
-            ?: context.screen?.takeIf { java.io.File(it).isFile }?.let { FoundImage(context.chatId, context.userMessageId, it) }
-            ?: throw ToolError("There is no image in this chat to remember. Ask the user to send it.")
-        val id = images.save(title, details, image)
-        onImageSaved(id, context.userText)
-        return Applied(
-            result = ok("id" to id, "saved" to "the image and your details; it will be shown to you again when the user asks about it"),
-            chip = MemoryChip(MemoryChip.Kind.IMAGE, "Saved image", title),
-            undo = UndoToken(createdNoteId = id),
         )
     }
 
@@ -1389,7 +1361,7 @@ class ToolExecutor(
     }
 }
 
-/** No image store: remember_image finds nothing to remember. */
+/** No image store: nothing to undo. */
 private object NoImageNotes : ImageNotes {
     override suspend fun findImage(chatId: Long, upToMessageId: Long): FoundImage? = null
     override suspend fun save(title: String, details: String, image: FoundImage): Long = error("no image store")

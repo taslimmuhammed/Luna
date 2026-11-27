@@ -113,35 +113,12 @@ fun MemoryScreen(viewModel: MemoryViewModel, onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
-    val addingImage by viewModel.addingImage.collectAsStateWithLifecycle()
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let(viewModel::addSavedImage)
-    }
 
     ShowNotices(viewModel, snackbar)
 
     Scaffold(
         containerColor = AppColors.Background,
         snackbarHost = { GlassSnackbarHost(snackbar) },
-        floatingActionButton = {
-            // The same as sending a photo and saying "remember this": the model names and
-            // describes it, and it is kept with what it wrote.
-            if (tab == 2) {
-                FloatingActionButton(
-                    onClick = {
-                        if (!addingImage) pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    },
-                    containerColor = AppColors.Accent,
-                    contentColor = AppColors.OnAccent,
-                ) {
-                    if (addingImage) {
-                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = AppColors.OnAccent)
-                    } else {
-                        Icon(Icons.Filled.Add, contentDescription = "Add an image")
-                    }
-                }
-            }
-        },
         topBar = {
             TopAppBar(
                 title = { Text("What I know about you", style = MaterialTheme.typography.titleMedium) },
@@ -160,12 +137,10 @@ fun MemoryScreen(viewModel: MemoryViewModel, onBack: () -> Unit) {
             TabRow(selectedTabIndex = tab, containerColor = AppColors.Background, contentColor = AppColors.TextPrimary) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("About you") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Reminders & events") })
-                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Images") })
             }
             when (tab) {
                 0 -> FactsTab(viewModel)
-                1 -> AgendaTab(viewModel)
-                else -> ImagesTab(viewModel)
+                else -> AgendaTab(viewModel)
             }
         }
     }
@@ -387,132 +362,6 @@ private fun EventRow(event: EventEntity) {
         )
     }
 }
-
-// ---- Saved images ----
-
-@Composable
-private fun ImagesTab(viewModel: MemoryViewModel) {
-    val notes by viewModel.savedImages.collectAsStateWithLifecycle()
-    val adding by viewModel.addingImage.collectAsStateWithLifecycle()
-    var open by remember { mutableStateOf<NoteEntity?>(null) }
-    var deleting by remember { mutableStateOf<NoteEntity?>(null) }
-    // Room at the bottom so the "+" never covers the last row.
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 88.dp)) {
-        item { SectionHeader("Saved images") }
-        if (adding) item { AddingImageRow() }
-        if (notes.isEmpty() && !adding) {
-            item { Note("Nothing saved yet. Tap + to add a photo, or send one in a chat and say “remember this” — a receipt, a label, a whiteboard — and ask about it any time later.") }
-        }
-        items(notes, key = { "note-${it.id}" }) { note ->
-            Dismissible(onDismiss = { viewModel.deleteSavedImage(note) }) {
-                SavedImageRow(note, onClick = { open = note }, onDelete = { deleting = note })
-            }
-        }
-        if (notes.isNotEmpty()) item { Note("Ask about a saved image in any chat and the assistant looks at it again. Tap one to see it; the bin (or a swipe left) deletes it.") }
-    }
-    open?.let { note -> SavedImageDialog(note, onDone = { open = null }, onDelete = { deleting = note }) }
-    deleting?.let { note ->
-        AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text("Delete “${note.title}”?") },
-            text = {
-                Text(
-                    "The saved image and what was noted about it are removed, and the assistant won't recall it any more. " +
-                        "If it came from a chat, it stays in that chat.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.deleteSavedImage(note)
-                    deleting = null
-                    open = null
-                }) { Text("Delete", color = AppColors.Danger) }
-            },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
-        )
-    }
-}
-
-/** Where the new image will appear, while the model reads it. */
-@Composable
-private fun AddingImageRow() {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).glass(RowShape).padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(AppColors.SurfaceMuted), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = AppColors.Accent)
-        }
-        Column(Modifier.weight(1f).padding(start = 12.dp)) {
-            Text("Looking at the image…", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextPrimary)
-            Text("Reading everything in it to save with it. This can take a little while.", style = MaterialTheme.typography.bodySmall, color = AppColors.TextSecondary)
-        }
-    }
-}
-
-@Composable
-private fun SavedImageRow(note: NoteEntity, onClick: () -> Unit, onDelete: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().glass(RowShape).clickable(onClick = onClick).padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        val shown = rememberShown(note.details)
-        Thumbnail(note.imagePath, blurred = shown.hidden)
-        Column(Modifier.weight(1f).padding(start = 12.dp)) {
-            Text(note.title, style = MaterialTheme.typography.bodyLarge, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(shown.text, style = MaterialTheme.typography.bodySmall, color = AppColors.TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text("Saved " + formatWhen(note.createdAt, true), style = MaterialTheme.typography.labelSmall, color = AppColors.TextSecondary)
-        }
-        IconButton(onClick = onDelete) {
-            Icon(Icons.Outlined.DeleteOutline, contentDescription = "Delete “${note.title}”", tint = AppColors.TextSecondary)
-        }
-    }
-}
-
-/** A small square crop, decoded small: these rows can be many. [blurred]: a card or document, until shown. */
-@Composable
-private fun Thumbnail(path: String?, blurred: Boolean = false) {
-    val bitmap = remember(path, blurred) {
-        path?.let {
-            runCatching {
-                BitmapFactory.decodeFile(it, BitmapFactory.Options().apply { inSampleSize = THUMB_SAMPLE })
-                    ?.let { b -> if (blurred) com.local.assistant.ui.privacy.unreadable(b) else b }
-                    ?.asImageBitmap()
-            }.getOrNull()
-        }
-    }
-    val modifier = Modifier.size(56.dp).clip(RoundedCornerShape(10.dp))
-    if (bitmap == null) {
-        Box(modifier.background(AppColors.SurfaceMuted))
-    } else {
-        Image(bitmap = bitmap, contentDescription = null, contentScale = ContentScale.Crop, modifier = modifier)
-    }
-}
-
-@Composable
-private fun SavedImageDialog(note: NoteEntity, onDone: () -> Unit, onDelete: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDone,
-        title = { Text(note.title) },
-        text = {
-            val shown = rememberShown(note.details)
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (shown.hidden) {
-                    Thumbnail(note.imagePath, blurred = true)
-                } else {
-                    note.imagePath?.let { AttachedImage(it, maxHeight = 320) }
-                }
-                Text(shown.text, style = MaterialTheme.typography.bodyMedium, color = AppColors.TextPrimary, modifier = Modifier.padding(top = 12.dp))
-                if (shown.hidden) HiddenDetails(Modifier.padding(top = 4.dp))
-                Text("Saved " + formatWhen(note.createdAt, false), style = MaterialTheme.typography.labelSmall, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 8.dp))
-            }
-        },
-        confirmButton = { TextButton(onClick = onDone) { Text("Close") } },
-        dismissButton = { TextButton(onClick = onDelete) { Text("Delete", color = AppColors.Danger) } },
-    )
-}
-
-private const val THUMB_SAMPLE = 4
 
 // ---- Shared ----
 

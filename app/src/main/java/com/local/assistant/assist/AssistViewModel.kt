@@ -196,7 +196,7 @@ class AssistViewModel(
     private var closed = false
 
     init {
-        // Gemma loads only when Nano won't answer: no Nano, Nano resting, or the lock screen.
+        // Gemma loads only when Nano won't answer: no Nano, or Nano resting. Over the lock screen too.
         viewModelScope.launch {
             val phone = local?.answersOnPhone() == true
             onPhone.value = phone

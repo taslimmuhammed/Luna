@@ -51,7 +51,6 @@ object CloudScope {
         ToolCatalog.SEARCH_MEMORY,
         ToolCatalog.FORGET,
         ToolCatalog.SET_ALARM,
-        ToolCatalog.REMEMBER_IMAGE,
         ToolCatalog.EDIT_NOTE,
         ToolCatalog.SET_TIMER,
         ToolCatalog.PHONE_SETTING,

@@ -3,6 +3,7 @@ package com.local.assistant.memory.summary
 import android.util.Log
 import com.local.assistant.data.db.Role
 import com.local.assistant.llm.LlmBackend
+import com.local.assistant.llm.NanoFirstBackend
 import com.local.assistant.memory.db.SessionDao
 import com.local.assistant.memory.db.SummaryStatus
 import com.local.assistant.memory.prompt.MemoryBudget
@@ -16,7 +17,8 @@ import com.local.assistant.memory.work.ModelScheduler
  * from ("Last time you talked: …").
  *
  * Runs from the session-end job ten minutes after the app leaves the foreground, and from the
- * nightly job for anything still pending. Never on the way to a reply: a summary waits for the
+ * nightly job for anything still pending; on Nano, from the app coming back to the front
+ * (`AppContainer.catchUpOnPhone`), as AICore serves only the app in front. Never on the way to a reply: a summary waits for the
  * model to be free, one session at a time, and gives way the moment the user is back.
  */
 class SessionSummaries(
@@ -67,6 +69,9 @@ class SessionSummaries(
                         Outcome.Written(summarizer.session(turns, cap))
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
+                    } catch (e: NanoFirstBackend.NanoUnavailable) {
+                        // Not the summary's fault: it stays pending for next time.
+                        Outcome.Unavailable
                     } catch (e: Exception) {
                         Log.w(TAG, "Summary failed for session ${session.id}", e)
                         Outcome.Written(null)

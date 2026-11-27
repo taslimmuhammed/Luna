@@ -99,8 +99,6 @@ class MemoryViewModel(
     private val settings: SettingsStore,
     private val forgetAll: suspend () -> Unit,
     estimator: TokenEstimator,
-    /** The Images tab's "+": the model names and describes the image, then it is saved. */
-    private val addImage: suspend (Uri) -> NoteEntity? = { null },
     private val zone: () -> ZoneId = ZoneId::systemDefault,
 ) : ViewModel() {
 
@@ -119,8 +117,6 @@ class MemoryViewModel(
 
     val events: StateFlow<List<EventEntity>> = controls.observeEvents().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val savedImages: StateFlow<List<NoteEntity>> = controls.observeSavedImages().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-
     private val _duplicates = MutableStateFlow<List<DuplicateSuggestion>>(emptyList())
     val duplicates: StateFlow<List<DuplicateSuggestion>> = _duplicates.asStateFlow()
 
@@ -129,10 +125,6 @@ class MemoryViewModel(
 
     val retentionDays: StateFlow<Int> = settings.observeHistoryRetentionDays()
         .stateIn(viewModelScope, SharingStarted.Eagerly, settings.historyRetentionDays)
-
-    /** An image from the "+" is with the model. */
-    private val _addingImage = MutableStateFlow(false)
-    val addingImage: StateFlow<Boolean> = _addingImage.asStateFlow()
 
     private val _notices = MutableSharedFlow<Notice>(extraBufferCapacity = 4)
     val notices: SharedFlow<Notice> = _notices.asSharedFlow()
@@ -204,41 +196,6 @@ class MemoryViewModel(
         _notices.emit(Notice("Deleted “${event.title}”", undo = { controls.restoreEvent(event) }))
     }
 
-    /** The note goes now; its image file once the undo has passed. */
-    fun deleteSavedImage(note: NoteEntity) = launch {
-        controls.deleteSavedImage(note)
-        _notices.emit(
-            Notice(
-                "Deleted “${note.title}”",
-                undo = { controls.restoreSavedImage(note) },
-                settle = { controls.discardSavedImageFile(note) },
-            ),
-        )
-    }
-
-    fun addSavedImage(uri: Uri) {
-        if (_addingImage.value) return
-        _addingImage.value = true
-        launch {
-            val message = try {
-                val note = addImage(uri)
-                if (note == null) {
-                    Notice("The model isn't available right now, so the image wasn't saved")
-                } else {
-                    Notice("Saved “${note.title}”", undo = { controls.deleteSavedImage(note) })
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not add the image", e)
-                Notice("Couldn't read that image. Try again, or send it in a chat.")
-            } finally {
-                _addingImage.value = false
-            }
-            _notices.emit(message)
-        }
-    }
-
     fun setPaused(paused: Boolean) {
         settings.memoryPaused = paused
     }
@@ -308,7 +265,6 @@ class MemoryViewModel(
                     settings = container.settings,
                     forgetAll = container::forgetEverything,
                     estimator = container.tokenEstimator,
-                    addImage = container::addSavedImage,
                 )
             }
         }

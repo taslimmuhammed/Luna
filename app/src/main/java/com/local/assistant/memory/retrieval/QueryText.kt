@@ -84,9 +84,17 @@ object QueryText {
 
     /** "Show me photos from Munnar", "get my beach videos": asking to see them, not telling about them. */
     fun asksForPhotos(text: String): Boolean {
-        val words = words(text.lowercase(Locale.ROOT))
-        return words.any { it in PHOTO_WORDS } && words.any { it in SEE_WORDS }
+        val lower = text.lowercase(Locale.ROOT)
+        val words = words(lower)
+        return (words.any { it in PHOTO_WORDS } && words.any { it in SEE_WORDS }) || LOOK_IN_PHOTOS.containsMatchIn(lower)
     }
+
+    /**
+     * "Check my photos", "look in my gallery": a search of the user's own photos. Not "check this
+     * photo" or "look at the pictures", about ones in front of the model. "What is my PAN card
+     * number? Check my photos." went out with no search on Nano (26 Nov 2026).
+     */
+    private val LOOK_IN_PHOTOS = Regex("\\b(check|search|scan|look (in|through|at)|go through|browse)\\s+(in\\s+)?my\\s+(photos|pics|pictures|images|gallery)\\b")
 
     /**
      * "Do you have any latest messages", "what did Rahul text me", "any SMS from the bank": about

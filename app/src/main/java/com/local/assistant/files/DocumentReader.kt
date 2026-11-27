@@ -33,6 +33,11 @@ class DocumentReader(
     private val backend: LlmBackend,
     private val model: ModelAccess,
     private val estimator: TokenEstimator = HeuristicTokenEstimator,
+    /**
+     * The model reading takes one picture a request (Gemini Nano): a scanned PDF's pages are each
+     * written out in a conversation of their own, and the answer comes from what they say.
+     */
+    private val onePicturePerAsk: suspend () -> Boolean = { false },
 ) {
 
     /**
@@ -140,27 +145,40 @@ class DocumentReader(
         return Plan.reply(reply.replace("**", ""), note)
     }
 
-    /** [read]'s pages shown to the vision model one by one, and [ask] put with the last. */
-    private suspend fun lookAt(name: String, read: Read.Scanned, question: String): String =
-        backend.openChat(SCANNED_SPEC).use { session ->
-            suspend fun ask(prompt: String, page: java.io.File): String {
-                val out = StringBuilder()
-                session.send(prompt, PromptAttachment(page.path, AttachmentKind.IMAGE)).collect { event ->
-                    when (event) {
-                        is GenEvent.TextDelta -> out.append(event.text)
-                        is GenEvent.Error -> throw event.cause
-                        else -> Unit
-                    }
-                }
-                return out.toString().trim()
-            }
-            val pages = read.pages
+    /** [read]'s pages shown to the vision model one by one, and [question] put with the last. */
+    private suspend fun lookAt(name: String, read: Read.Scanned, question: String): String {
+        val pages = read.pages
+        if (pages.size > 1 && onePicturePerAsk()) return pageByPage(name, read, question)
+        return backend.openChat(SCANNED_SPEC).use { session ->
             for ((i, page) in pages.withIndex()) {
                 if (i == pages.lastIndex) break
-                ask("Page ${i + 1} of the document \"$name\". Read it; reply with only: OK", page)
+                ask(session, "Page ${i + 1} of the document \"$name\". Read it; reply with only: OK", page)
             }
-            ask("Page ${pages.size} of the document \"$name\". From the page${if (pages.size > 1) "s" else ""} you've seen: $question", pages.last())
+            ask(session, "Page ${pages.size} of the document \"$name\". From the page${if (pages.size > 1) "s" else ""} you've seen: $question", pages.last())
         }
+    }
+
+    /** Each page written out in a conversation of its own, then [question] answered from them all. */
+    private suspend fun pageByPage(name: String, read: Read.Scanned, question: String): String {
+        val written = read.pages.mapIndexedNotNull { i, page ->
+            val said = backend.openChat(SCANNED_SPEC).use { session -> ask(session, Plan.writeOutAsk(name, i + 1), page) }
+            said.replace("**", "").trim().takeIf { it.isNotEmpty() }?.let { "[Page ${i + 1}]\n$it" }
+        }
+        if (written.isEmpty()) return ""
+        return complete("The document \"$name\", its pages written out:\n\n${written.joinToString("\n\n")}\n\n$question", ANSWER_TOKENS)
+    }
+
+    private suspend fun ask(session: com.local.assistant.llm.ChatSession, prompt: String, page: java.io.File): String {
+        val out = StringBuilder()
+        session.send(prompt, PromptAttachment(page.path, AttachmentKind.IMAGE)).collect { event ->
+            when (event) {
+                is GenEvent.TextDelta -> out.append(event.text)
+                is GenEvent.Error -> throw event.cause
+                else -> Unit
+            }
+        }
+        return out.toString().trim()
+    }
 
     private suspend fun complete(input: String, maxTokens: Int): String =
         backend.complete(SYSTEM, input, maxTokens = maxTokens, sampling = Sampling.BACKGROUND).replace("**", "").trim()
@@ -283,6 +301,11 @@ class DocumentReader(
         fun summaryAsk(): String =
             "Summarise this document for the user in at most 8 short bullet points: what it is, who it's from or between, " +
                 "the key facts, amounts and dates, and anything they need to do. Copy numbers exactly as written."
+
+        /** One page of a scanned document, for a model that sees one picture a request. */
+        fun writeOutAsk(name: String, page: Int): String =
+            "Page $page of the document \"$name\". Write out what is printed on it, in reading order: " +
+                "names, numbers, dates and amounts exactly as printed. Reply with only that."
 
         fun gistAsk(request: String): String =
             "In at most 100 words, note what this document is and the facts in it an assistant needs to do this for the user: \"$request\". " +

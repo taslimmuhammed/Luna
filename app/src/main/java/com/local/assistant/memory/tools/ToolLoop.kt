@@ -164,6 +164,12 @@ class ToolLoop(
         // until the model has been asked once more to search ([PHOTO_CHECK]).
         val mustSearch = photosAvailable() && !context.locked && com.local.assistant.memory.retrieval.QueryText.asksForPhotos(context.userText)
         var searchAsked = false
+        // An ID number asked for ("what's my PAN card number?"): a reply with no number of its
+        // shape, and no search, is held back and the photos searched here instead. Nano answered
+        // "I cannot retrieve your PAN number" with no call, 1 time in 2 (26 Nov 2026), and asked
+        // again at its low temperature it would likely say the same.
+        val idAsked = if (photosAvailable() && !context.locked) com.local.assistant.gallery.PhotoReader.Field.of(context.userText) else null
+        var searchForced = false
         // Health data read this turn: a number put right in the reply may be a reading, and those are never logged.
         var readHealth = false
         val text = if (groundNumbers()) GroundedReply(grounding) { wrote, source -> if (!readHealth) onNumberFixed(wrote, source) } else null
@@ -277,8 +283,10 @@ class ToolLoop(
                             if (wordsChecked) confirm()
                         } else {
                             opening.append(event.text)
-                            if (!suspect) show(event.text, provisional = true)
-                            val end = if (suspect || mustSearch) null else ActionClaims.openingEnd(opening)
+                            // An ID number's reply isn't shown until it's known to have the number:
+                            // "I can't retrieve your PAN" flashed up, then gave way to the search.
+                            if (!suspect && idAsked == null) show(event.text, provisional = true)
+                            val end = if (suspect || mustSearch || idAsked != null) null else ActionClaims.openingEnd(opening)
                             when {
                                 end == null -> Unit
                                 claimed(opening.substring(0, end)) -> {
@@ -356,7 +364,8 @@ class ToolLoop(
                 return@flow
             }
             val opening = held
-            if (opening != null && calls.isEmpty() && mustSearch && !searchAsked) {
+            // An ID number goes to the search below instead: run here, not asked for.
+            if (opening != null && calls.isEmpty() && mustSearch && !searchAsked && idAsked == null) {
                 // "Could you show all the photos of wedding", right after a search for them,
                 // answered with no search, and again after the general check (1 Nov 2026).
                 retract()
@@ -372,7 +381,18 @@ class ToolLoop(
                 reply = session.send(PHOTO_CHECK, null)
                 continue
             }
-            if (opening != null) {
+            // The ID number not in the reply, and no search for it: searched for here.
+            val forceSearch = opening != null && calls.isEmpty() && idAsked != null && !searchForced &&
+                ToolCatalog.FIND_PHOTOS !in tools && idAsked.valueIn(opening.toString()) == null
+            if (forceSearch) {
+                retract()
+                onUnbackedClaim(opening.toString())
+                searchForced = true
+                checked = true
+                calls += ToolCall(ToolCatalog.FIND_PHOTOS, mapOf("query" to idAsked!!.document, "question" to context.userText))
+                mark("no number and no photo search for an ID number: searching here")
+            }
+            if (opening != null && !forceSearch) {
                 if (calls.isEmpty() && (suspect || claimed(opening) || ActionClaims.unshownDraft(opening))) {
                     // Said it did something no tool did: taken back, and the model asked again,
                     // once. The live conversation now holds a reply that isn't stored, so it is
@@ -387,8 +407,9 @@ class ToolLoop(
                     // Asked again and still saying it (the panel's "yes go ahead" by voice,
                     // 27 Oct 2026): what is true goes out instead.
                     show(if (mustSearch) NOT_SEARCHED else NOT_DONE)
-                } else if (suspect) {
-                    // Said it did something, and a call here does it: it stands after all.
+                } else if (suspect || idAsked != null) {
+                    // Said it did something, and a call here does it: it stands after all. Or
+                    // held for an ID number, and it has one: shown now.
                     show(opening.toString())
                 } else {
                     confirm()
@@ -506,6 +527,9 @@ class ToolLoop(
             val image = results.firstNotNullOfOrNull { it.image }?.takeIf { seesImages() && java.io.File(it).isFile }
             reply = if (image != null) {
                 session.send(toolResultsWithImage(results), PromptAttachment(image, com.local.assistant.data.db.AttachmentKind.IMAGE))
+            } else if (forceSearch) {
+                // The model made no call, so there is none for the results to answer: they go as a message.
+                session.send(com.local.assistant.llm.ToolReplay.asMessage(results, note = "the app searched the photos for what they asked"), null)
             } else {
                 session.sendToolResults(results)
             }

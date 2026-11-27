@@ -42,7 +42,6 @@ import com.local.assistant.device.AndroidContacts
 import com.local.assistant.device.AndroidPhone
 import com.local.assistant.device.PermissionBroker
 import com.local.assistant.memory.MemoryControls
-import com.local.assistant.memory.notes.ImageDescriber
 import com.local.assistant.memory.notes.SavedImages
 import com.local.assistant.memory.notes.UserNotes
 import com.local.assistant.memory.db.ArchiveRepository
@@ -101,6 +100,7 @@ import com.local.assistant.web.TavilySearch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -156,6 +156,7 @@ class AppContainer(context: Context) {
             }
             // ML Kit's speech model, downloaded by AICore if the phone can have it ([SpeechModel]).
             speechModel.refresh()
+            catchUpOnPhone()
             // A new chat on screen: its conversation made ready again if it went meanwhile.
             conversations.cameIntoSight()
             embeddingQueue.kick()
@@ -276,7 +277,6 @@ class AppContainer(context: Context) {
         facts = memoryRepository,
         archive = archive,
         embedder = embedder,
-        notes = savedImages,
         userNotes = userNotes,
         // Similarities in debug builds, to calibrate the threshold on real pairs.
         logScores = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
@@ -287,25 +287,50 @@ class AppContainer(context: Context) {
     val llmBackend: LlmBackend = LiteRtLmBackend(llmService, settings)
 
     /**
-     * Local chats, the overlay's included, on Gemini Nano through AICore while the app is in front
-     * and the phone is unlocked, on Gemma otherwise. Background jobs stay on [llmBackend].
+     * The app's screens made but not started yet. AICore serves an app whose screen is opening
+     * (it's the top app by then), a moment before [appForeground] counts it as in front: the
+     * brief starts sorting as it opens.
+     */
+    private val screensOpening: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Keeps [screensOpening]; registered by the application. */
+    val screenWatcher = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {
+            screensOpening += System.identityHashCode(activity)
+        }
+        override fun onActivityStarted(activity: android.app.Activity) {
+            screensOpening -= System.identityHashCode(activity)
+        }
+        override fun onActivityDestroyed(activity: android.app.Activity) {
+            screensOpening -= System.identityHashCode(activity)
+        }
+        override fun onActivityResumed(activity: android.app.Activity) = Unit
+        override fun onActivityPaused(activity: android.app.Activity) = Unit
+        override fun onActivityStopped(activity: android.app.Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) = Unit
+    }
+
+    /**
+     * Local chats, the overlay's included, and one-shot jobs done while the app is in front (a
+     * chat's summary, reading a document or a found photo, sorting the brief) on Gemini Nano
+     * through AICore while a screen of the app's is in front (over the lock screen too), on Gemma
+     * otherwise.
      */
     val chatBackend = com.local.assistant.llm.NanoFirstBackend(
         nano = com.local.assistant.llm.AiCoreBackend(),
         gemma = llmBackend,
-        foreground = { appForeground.isForeground },
-        locked = { context.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true },
+        foreground = { appForeground.isForeground || screensOpening.isNotEmpty() },
     )
 
     /**
      * The assistant overlay is open. Coming to the front for it doesn't load Gemma when Nano
-     * answers it; the app's own screens still do, for what only Gemma does yet (reading found
-     * photos and documents, the lock screen).
+     * answers it, on the lock screen too; the app's own screens still do, for the nightly jobs.
      */
     @Volatile
     var overlayOpen: Boolean = false
 
-    private val summarizer = Summarizer(llmBackend, tokenEstimator)
+    /** A chat's older turns folded into its summary on the chat's model: Nano in front, Gemma otherwise. */
+    private val summarizer = Summarizer(chatBackend, tokenEstimator)
 
     val modelScheduler = ModelScheduler()
 
@@ -531,15 +556,10 @@ class AppContainer(context: Context) {
         now = ZonedDateTime::now,
     )
 
-    private val imageDescriber = ImageDescriber(llmBackend, modelScheduler, conversations)
-
     /** Puts right, once, what the model wrote before its text decoder ran in fp32. */
     internal val precisionUpgrade = PrecisionUpgrade(
         database = database,
         archive = archive,
-        images = savedImages,
-        // At idle, like the other background model work: the user's messages come first.
-        reread = { path -> modelScheduler.runBackground(ModelScheduler.Priority.COMPACTION) { imageDescriber.read(path) } },
         onChanged = {
             conversations.prefixMayHaveChanged()
             embeddingQueue.kick()
@@ -562,46 +582,23 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** The latest [rereadSavedImage], for evals to wait on. */
-    @Volatile
-    internal var imageReread: Job? = null
-
-    /**
-     * For a model whose text decoder is still fp16 ([com.local.assistant.llm.ModelPrecision]
-     * couldn't set it): a "remember this" in a chat saves what the model wrote in its tool call,
-     * past token 2,048, where fp16 positions garble digits — a PIN 4417 was saved as "44417",
-     * 1800-209-4455 as "18000-2094555". So once the turn is over, the image is read again in a
-     * conversation of its own, short enough to copy every digit (as the Images tab's "+" does),
-     * and that replaces the details. It waits behind the turn and goes ahead of the next message,
-     * which then finds the live conversation closed and rebuilds it.
-     */
-    private fun rereadSavedImage(noteId: Long, said: String) {
-        // With the text decoder in fp32 the model's own details are exact: nothing to redo.
-        if (llmService.exactDigits) return
-        imageReread = appScope.launch {
-            try {
-                // The model's slot first: it frees once the turn is over, and by then the note —
-                // saved inside the tool's transaction, still open as this is called — is written.
-                val description = modelScheduler.runUser {
-                    database.noteDao().byId(noteId)?.imagePath?.let { imageDescriber.read(it, said) }
-                } ?: return@launch
-                if (savedImages.rewriteDetails(noteId, description.details) != null) embeddingQueue.kick()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("AppContainer", "Could not read saved image $noteId again", e)
-            }
-        }
-    }
-
     /** A photo question answered from the found photo in a short conversation of its own. */
-    private val photoReader = PhotoReader(llmBackend, conversations)
+    /** Found photos read on the chat's model: Gemini Nano while it answers, Gemma otherwise. */
+    private val photoReader = PhotoReader(chatBackend, conversations)
 
     /** Files on the phone by name: read_file, declared once All files access is given. */
     val fileFinder = com.local.assistant.files.FileFinder(context)
 
-    /** A document's question or summary, answered in short conversations of its own. */
-    val documentReader = com.local.assistant.files.DocumentReader(llmBackend, conversations)
+    /**
+     * A document's question or summary, answered in short conversations of its own on the chat's
+     * model: Nano while the app is in front, Gemma otherwise. Nano takes one picture a request, so
+     * a scanned PDF's pages go to it one at a time.
+     */
+    val documentReader = com.local.assistant.files.DocumentReader(
+        chatBackend,
+        conversations,
+        onePicturePerAsk = { chatBackend.answersOnPhone() },
+    )
 
     fun fileSearchReady(): Boolean = com.local.assistant.files.FileAccess.granted(appContext)
 
@@ -654,7 +651,6 @@ class AppContainer(context: Context) {
         archive = archiveSearch(retriever),
         memoryPaused = { settings.memoryPaused },
         images = savedImages,
-        onImageSaved = ::rereadSavedImage,
         device = deviceTools,
         web = WebTools(webSearch),
         ask = { askTools },
@@ -672,10 +668,11 @@ class AppContainer(context: Context) {
                 }
             },
             mayRead = { context.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked != true },
-            // Gemma reads found photos, loaded now if a Nano chat left it unloaded; not a model
-            // that turned out to take no images.
+            // Nano reads found photos while it answers; otherwise Gemma, loaded now if it isn't,
+            // unless it turned out to take no images.
             reader = { path, question ->
-                if (settings.modelPath != null && llmService.modalities.value?.vision != false) photoReader.answer(path, question) else null
+                val sees = chatBackend.answersOnPhone() || (settings.modelPath != null && llmService.modalities.value?.vision != false)
+                if (sees) photoReader.answer(path, question) else null
             },
             documents = { field -> fileTools.idNumber(field) },
         ),
@@ -739,8 +736,6 @@ class AppContainer(context: Context) {
     /** Facts, reminders and events learned in Cloud chats, and only those. */
     private val cloudMemory = MemoryRepository(database, cloudOnly = true)
 
-    private val cloudImages = SavedImages(context.filesDir, database.noteDao(), chatRepository, cloudOnly = true)
-
     private val cloudNotes = UserNotes(database.userNoteDao(), transaction = { block -> memoryRepository.transaction(block) }, cloudOnly = true)
 
     /** Recall over Cloud data: the query is embedded on the phone, and only Cloud hits come back. */
@@ -748,7 +743,6 @@ class AppContainer(context: Context) {
         facts = cloudMemory,
         archive = com.local.assistant.hybrid.CloudArchive(archive, database.chunkDao()),
         embedder = embedder,
-        notes = cloudImages,
         userNotes = cloudNotes,
     )
 
@@ -803,7 +797,8 @@ class AppContainer(context: Context) {
         now = ZonedDateTime::now,
         archive = archiveSearch(cloudRetriever),
         memoryPaused = { settings.memoryPaused },
-        images = cloudImages,
+        // Undoing an old save only.
+        images = savedImages,
         device = deviceTools,
         web = WebTools(cloudSearch),
         notes = cloudNotes,
@@ -842,17 +837,70 @@ class AppContainer(context: Context) {
 
     val attachmentStore = AttachmentStore(context)
 
+    /** Session summaries in the background: the session-end job and the nightly one, on Gemma. */
     val sessionSummaries = SessionSummaries(database.sessionDao(), summarizer, llmBackend, conversations, modelScheduler)
+
+    private val extractionRouter = ExtractionRouter(memoryRepository, reminderScheduler)
 
     private val extractor = Extractor(
         maintenance = database.maintenanceDao(),
         state = database.appStateDao(),
         backend = llmBackend,
-        router = ExtractionRouter(memoryRepository, reminderScheduler),
+        router = extractionRouter,
         conversations = conversations,
         scheduler = modelScheduler,
         estimator = tokenEstimator,
     )
+
+    /**
+     * The same two jobs on Nano alone, while the app is in front ([catchUpOnPhone]): AICore
+     * refuses an app in the background, a foreground service and all (26 Nov 2026).
+     */
+    private val sessionSummariesOnPhone = SessionSummaries(
+        database.sessionDao(),
+        Summarizer(chatBackend.nanoOnly, tokenEstimator),
+        chatBackend.nanoOnly,
+        conversations,
+        modelScheduler,
+    )
+
+    private val extractorOnPhone = Extractor(
+        maintenance = database.maintenanceDao(),
+        state = database.appStateDao(),
+        backend = chatBackend.nanoOnly,
+        router = extractionRouter,
+        conversations = conversations,
+        scheduler = modelScheduler,
+        estimator = tokenEstimator,
+    )
+
+    private var catchingUp: Job? = null
+
+    /**
+     * Back in front: the summaries of sessions that ended meanwhile ("Last time you talked") and
+     * the read for what the chat didn't save, on Nano, a few seconds in, at the scheduler's
+     * background priority, so typing or sending stops it at once. What's left waits for the next
+     * time, or the nightly job.
+     */
+    private fun catchUpOnPhone() {
+        if (catchingUp?.isActive == true) return
+        catchingUp = appScope.launch {
+            delay(CATCH_UP_DELAY_MS)
+            if (!appForeground.isForeground || !chatBackend.answersOnPhone()) return@launch
+            val deadline = System.currentTimeMillis() + CATCH_UP_BUDGET_MS
+            try {
+                sessionSummariesOnPhone.endQuietSessions()
+                val left = sessionSummariesOnPhone.summarisePending(deadline, loadModel = false)
+                val caughtUp = left == 0 && extractorOnPhone.run(deadline)
+                Log.i("AppContainer", "Caught up on Nano: $left summaries left${if (caughtUp) ", extraction done" else ""}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Nano stopped answering (the app left the front, or AICore refused): next time.
+                Log.i("AppContainer", "Catching up on Nano stopped: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+    }
 
     /** What the memory screen can see and change. */
     val memoryControls = MemoryControls(
@@ -891,21 +939,6 @@ class AppContainer(context: Context) {
             inbox.purge()
         },
     )
-
-    /**
-     * The Images tab's "+": the picked image goes through the model like "remember this" in a
-     * chat, and is kept with the title and details it wrote. Null when the model is unavailable.
-     */
-    suspend fun addSavedImage(uri: Uri): NoteEntity? {
-        val picked = attachmentStore.importImage(uri)
-        try {
-            val description = imageDescriber.describe(picked.absolutePath) ?: return null
-            return savedImages.saveUpload(description.title, description.details, picked.absolutePath)
-                .also { embeddingQueue.kick() }
-        } finally {
-            attachmentStore.delete(picked.absolutePath)
-        }
-    }
 
     /**
      * The chat model was just installed (the first download, or an import): load it and read the
@@ -1000,7 +1033,9 @@ class AppContainer(context: Context) {
         replies = com.local.assistant.away.ReplyActions(),
         scheduler = modelScheduler,
         model = conversations,
-        backend = llmBackend,
+        // Sorted on Nano when the brief opens at unlock (a screen of the app's own, as the
+        // overlay is); while locked, only by a Gemma already in memory, as before.
+        backend = chatBackend,
         modelLoaded = { llmService.state.value is LlmService.State.Ready },
         scope = appScope,
     )
@@ -1220,6 +1255,12 @@ class AppContainer(context: Context) {
         /** After coming to the front, how long photo indexing waits: the chat model warms up first. */
         const val FOREGROUND_INDEX_DELAY_MS = 10_000L
 
+        /** Back in front: how long before catching up on Nano, so the screen and the first message come first. */
+        const val CATCH_UP_DELAY_MS = 4_000L
+
+        /** How long catching up on Nano may take each time: a few summaries and extraction batches. */
+        const val CATCH_UP_BUDGET_MS = 60_000L
+
         /** EmbeddingGemma 300M's key, from before the photo model did memory search too. */
         const val OLD_EMBEDDER_KEY = "embeddinggemma-300m-wi8"
 
@@ -1241,6 +1282,7 @@ class AssistantApplication : Application() {
         LogText.showsUserText = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         container = AppContainer(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(container.appForeground)
+        registerActivityLifecycleCallbacks(container.screenWatcher)
         // The screen going off hides shown details too, even with the app (or the panel) in front.
         androidx.core.content.ContextCompat.registerReceiver(
             this,

@@ -170,7 +170,7 @@ object NanoPrompt {
 
     private val TOPICS: List<Pair<Regex, Set<String>>> = listOf(
         words("photo", "pic", "picture", "image", "video", "selfie", "gallery", "licen[cs]e", "passport", "aadha?a?r", "pan\\b", "card", "ticket", "bill", "certificate", "insurance", "document", "id\\b", "marks", "score")
-            to setOf(ToolCatalog.FIND_PHOTOS, ToolCatalog.REMEMBER_IMAGE, ToolCatalog.READ_FILE),
+            to setOf(ToolCatalog.FIND_PHOTOS, ToolCatalog.READ_FILE),
         words("send", "text", "message", "whatsapp", "sms", "e-?mail", "mail", "tell", "wish", "reply", "say hi", "hi to", "high to")
             to setOf(ToolCatalog.SEND_MESSAGE, ToolCatalog.CHECK_INBOX, ToolCatalog.CALL),
         words("did .* (say|send|message|text|reply)", "sent me", "message(d)? me", "inbox", "otp", "any message")

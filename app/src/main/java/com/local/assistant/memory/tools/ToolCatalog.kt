@@ -19,7 +19,6 @@ object ToolCatalog {
     const val SEARCH_MEMORY = "search_memory"
     const val FORGET = "forget"
     const val SET_ALARM = "set_alarm"
-    const val REMEMBER_IMAGE = "remember_image"
     /** Not "call": Gemma writes a tool call as `call:<name>{…}`, and `call:call` fails to parse. */
     const val CALL = "phone_call"
     const val SEND_MESSAGE = "send_message"
@@ -62,7 +61,7 @@ object ToolCatalog {
     const val RELATED_PHOTOS = "related_photos"
 
     /** Tools that change something, as opposed to reading it. */
-    val WRITES = setOf(ADD_TASK, UPDATE_TASK, ADD_EVENT, SAVE_FACT, FORGET, SET_ALARM, REMEMBER_IMAGE, EDIT_NOTE)
+    val WRITES = setOf(ADD_TASK, UPDATE_TASK, ADD_EVENT, SAVE_FACT, FORGET, SET_ALARM, EDIT_NOTE)
 
     /** The everyday tools (`DeviceTools`): they act on the phone, never on memory. */
     val DEVICE = setOf(CALL, SEND_MESSAGE, SET_TIMER, OPEN_APP, PHONE_SETTING, CALCULATE, TAKE_SCREENSHOT)
@@ -288,13 +287,6 @@ object ToolCatalog {
             "repeat" to "string",
         ),
         function(
-            REMEMBER_IMAGE,
-            "Use when the user asks you to remember or save an image they sent: a card, bill, document, screenshot or photo. The image itself is kept and shown to you again when they ask about it later. title: a few words naming it; details: everything you can read and see in it.",
-            required = listOf("title", "details"),
-            "title" to "string",
-            "details" to "string",
-        ),
-        function(
             EDIT_NOTE,
             "Use to make, change or delete the user's own notes and lists: shopping, packing, ideas, anything they ask you to note down or keep. note: its name or id (note 3); a name not there makes a new one. add: items to add, comma-separated, or text to add to a note. remove, check, uncheck: items, comma-separated; all, or done for the ticked ones. text: the whole new text. title: a new name. delete: true to delete it.",
             required = listOf("note"),
@@ -367,7 +359,6 @@ object ToolCatalog {
         Tools — call them rather than only saying you will:
         - Reminders and to-dos → add_task, with the user's own time words in when, or for one on reaching a place ("near DMart", "when I get home") the place in place.
         - Alarms ("set an alarm", "wake me up") → set_alarm, which rings in the phone's clock app.
-        - "Remember this" about an image → remember_image, with everything you can read in details (not save_fact).
         - Shopping, packing and other lists, and notes they ask you to keep or write down → edit_note (not save_fact); reminders and to-dos stay add_task. Use the names under "Notes and lists:".
         - Calls, messages, timers, apps and phone settings only when asked for now: "remind me to call amma at 6" is add_task, "I should call her" is no tool.
         - Screenshots: "take a screenshot" → take_screenshot; sending or sharing it with someone → send_message with screenshot=true, its text saying what's on it if they asked. Calls and messages only open the app: say it's ready to send, never that it was sent.
@@ -390,7 +381,6 @@ object ToolCatalog {
         Tools — call them rather than only saying you will:
         - Reminders and to-dos → add_task, with the user's own time words in when.
         - Alarms ("set an alarm", "wake me up") → set_alarm, which rings in the phone's clock app. Timers → set_timer. Flashlight, ringer, volume and other phone settings → phone_setting.
-        - "Remember this" about an image → remember_image, with everything you can read in details (not save_fact).
         - Shopping, packing and other lists, and notes they ask you to keep or write down → edit_note (not save_fact). Use the names under "Notes and lists:".
         - Any arithmetic or unit conversion → calculate.
         - Changing, finishing or moving an existing reminder → update_task.

@@ -14,7 +14,8 @@ import com.local.assistant.memory.work.ModelScheduler
 import java.time.ZoneId
 
 /**
- * The nightly read of past messages for what the chat itself did not save.
+ * The nightly read of past messages for what the chat itself did not save; on Nano, also when the
+ * app comes back to the front (`AppContainer.catchUpOnPhone`).
  *
  * Works through user messages after a watermark kept in `app_state`, a batch at a time, and moves
  * the watermark only once a batch is routed — so a run stopped part-way (by the user, or by the
@@ -87,13 +88,15 @@ class Extractor(
      * parse. Unconstrained on purpose: LiteRT-LM 0.17.1's JSON-schema decoding degraded this
      * model's output and then failed in the runtime ("compute_mask() called after stop") when
      * measured on the phone (MemoryEvalTest). Null when the model had to be given back to the
-     * user; an empty list when it found nothing (or never made sense of it).
+     * user, or there was none (Gemma not loading, Nano not answering): the batch waits. An empty
+     * list when it found nothing (or never made sense of it).
      */
     private suspend fun extract(batch: List<ExtractionInput>): List<ExtractedItem>? {
         val prompt = ExtractionPrompt.render(batch, zone())
         return scheduler.runBackground(ModelScheduler.Priority.NIGHTLY) {
             conversations.withModelFree {
-                if (!backend.ensureReady()) return@withModelFree emptyList()
+                // No model: the batch waits for next time, rather than counting as read.
+                if (!backend.ensureReady()) return@withModelFree null
                 backend.complete(ExtractionPrompt.SYSTEM, prompt, maxTokens = OUTPUT_TOKENS).let(ExtractionParser::parse)
                     ?: backend.complete(ExtractionPrompt.SYSTEM, "$prompt\n${ExtractionPrompt.RETRY}", maxTokens = OUTPUT_TOKENS)
                         .let(ExtractionParser::parse)

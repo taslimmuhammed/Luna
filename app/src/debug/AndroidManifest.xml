@@ -11,5 +11,12 @@
                 <action android:name="com.local.assistant.debug.MODEL_PROBE" />
             </intent-filter>
         </receiver>
+        <!-- Whether Nano answers over the lock screen; started from adb, as above. -->
+        <activity
+            android:name="com.local.assistant.debug.LockProbeActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
     </application>
 </manifest>
