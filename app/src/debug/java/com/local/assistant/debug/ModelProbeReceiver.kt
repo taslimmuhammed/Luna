@@ -77,6 +77,11 @@ class ModelProbeReceiver : BroadcastReceiver() {
                         mode = com.local.assistant.hybrid.ChatMode.of(intent.getStringExtra("chatmode")) ?: com.local.assistant.hybrid.ChatMode.CLOUD,
                     )
                     "voice" -> VoiceBench(context, ::log).run(download = intent.getBooleanExtra("download", false))
+                    // How screenshots' words score against searches: --ei max 40 [--ez nano true]
+                    "screentext" -> ScreenTextProbe(container, ::log).run(
+                        max = intent.getIntExtra("max", 40),
+                        nano = intent.getBooleanExtra("nano", true),
+                    )
                     else -> ModelProbe(context, container.settings.systemPrompt, ::log, cases, temperature).run(only, nanoChoice)
                 }
             } catch (e: Throwable) {

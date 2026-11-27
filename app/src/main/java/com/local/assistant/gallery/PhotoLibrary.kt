@@ -272,14 +272,38 @@ class PhotoLibrary(private val context: Context) {
                 while (cursor.moveToNext()) {
                     val folder = cursor.getString(1).orEmpty()
                     val name = cursor.getString(2).orEmpty()
-                    if (folder.equals("Screenshots", ignoreCase = true) || name.startsWith("Screenshot", ignoreCase = true)) {
-                        found[cursor.getLong(0)] = screenshotOf(name, ownPackages)
-                    }
+                    if (isScreenshot(folder, name)) found[cursor.getLong(0)] = screenshotOf(name, ownPackages)
                 }
             }
         }
         return found
     }
+
+    /**
+     * Every screenshot the app may see, newest first, each with whether it is one of this app
+     * ([screenshots]): for reading their words ([ScreenText]).
+     */
+    fun allScreenshots(): Map<Long, Boolean> {
+        if (access() == Access.NONE) return emptyMap()
+        val found = LinkedHashMap<Long, Boolean>()
+        resolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME, MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} LIKE ? OR ${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?",
+            arrayOf("Screenshots", "Screenshot%"),
+            "${MediaStore.Images.Media.DATE_ADDED} DESC",
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(2).orEmpty()
+                if (isScreenshot(cursor.getString(1).orEmpty(), name)) found[cursor.getLong(0)] = screenshotOf(name, ownPackages)
+            }
+        }
+        return found
+    }
+
+    /** In a "Screenshots" folder, or named "Screenshot…" as phones name them. */
+    private fun isScreenshot(folder: String, name: String): Boolean =
+        folder.equals("Screenshots", ignoreCase = true) || name.startsWith("Screenshot", ignoreCase = true)
 
     /** This app under every name it has had, so screenshots of earlier installs count too. */
     private val ownPackages: List<String> = (OWN_PACKAGES + context.packageName).distinct()
@@ -323,6 +347,29 @@ class PhotoLibrary(private val context: Context) {
             resolver.loadThumbnail(uri(mediaId), Size(maxSide, maxSide), null)
         } else {
             decodeSampled(mediaId, maxSide)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not read photo $mediaId: ${e.message}")
+        null
+    }
+
+    /**
+     * The photo as large as it is, for reading its words ([ScreenText]): a screenshot's small
+     * print is lost at the sizes the model and the thumbnails use. Halved as often as it takes to
+     * keep it to [maxPixels] (a long scrolling screenshot). Null if it can't be read.
+     */
+    fun bitmapToRead(mediaId: Long, maxPixels: Int): Bitmap? = try {
+        val uri = uri(mediaId)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            var sample = 1
+            while (bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > maxPixels) sample *= 2
+            resolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+            }
         }
     } catch (e: Exception) {
         Log.w(TAG, "Could not read photo $mediaId: ${e.message}")

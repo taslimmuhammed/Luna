@@ -32,7 +32,8 @@ import kotlin.coroutines.coroutineContext
  * ones out) and then embeds whatever has no vector yet: photos newest first, then videos. With
  * Find people on, each photo's faces are looked for in the same slot. Every batch goes through
  * the [ModelScheduler], behind anything the user or the chat memory is doing, and stops between
- * photos when they start. It starts once the photo model and access are there and runs while the
+ * photos when they start. Screenshots' words are read and embedded too ([ScreenText]), and
+ * searched beside their pictures. It starts once the photo model and access are there and runs while the
  * app is in front, and on the charger at night ([indexUntil]).
  */
 class GalleryIndex(
@@ -136,6 +137,7 @@ class GalleryIndex(
             // before Find people was on.
             if (!indexPending(deadline)) return false
             scoreDocuments()
+            if (!readScreenshots(deadline)) return false
             embedder.release()
             if (!locatePending(deadline)) return false
             finished = faces?.indexPending(deadline) { block -> runWhenIdle(block) } ?: true
@@ -166,9 +168,12 @@ class GalleryIndex(
         }
         val gone = known.keys.filter { it !in seen }
         changed.chunked(SQL_BATCH).forEach { dao.upsert(it) }
+        // An edited screenshot's words are read again.
+        changed.chunked(SQL_BATCH).forEach { batch -> dao.deleteTexts(batch.map { it.mediaId }) }
         gone.chunked(SQL_BATCH).forEach { dao.delete(it) }
         if (changed.isNotEmpty() || gone.isNotEmpty()) {
             dao.deleteOrphanFrames()
+            dao.deleteOrphanTexts()
             vectorsStale = true
             Log.i(TAG, "Synced ${photos.size} photos: ${changed.size} new or edited, ${gone.size} gone, in ${clock() - started} ms")
         }
@@ -232,6 +237,69 @@ class GalleryIndex(
                 val seconds = (clock() - started) / 1000.0
                 Log.i(TAG, "Indexed $embedded photos (faces looked for in $looked) in ${"%.1f".format(seconds)} s; ${_status.value.remaining} left")
             }
+        }
+    }
+
+    /**
+     * Reads the words on screenshots not read yet ([ScreenText]) and embeds them, newest first, a
+     * few per slot as photos are. A screenshot of this app, or one that can't be read, is read as
+     * having no words. False when the time ran out with some left.
+     */
+    private suspend fun readScreenshots(deadline: Long): Boolean {
+        val done = dao.textsReadBy(ScreenText.READ_BY).toHashSet()
+        val known = dao.stamps().mapTo(HashSet()) { it.mediaId }
+        val shots = withContext(Dispatchers.IO) { library.allScreenshots() }
+        val todo = shots.keys.filterTo(ArrayList()) { it in known && it !in done }
+        if (todo.isEmpty()) return true
+        val started = clock()
+        var read = 0
+        var withWords = 0
+        val reader = ScreenText()
+        try {
+            while (todo.isNotEmpty()) {
+                if (clock() >= deadline) return false
+                val slot = runWhenIdle { coroutineScope {
+                    for (mediaId in todo.take(BATCH)) {
+                        ensureActive()
+                        val words = if (shots[mediaId] == true) "" else ScreenText.clean(readWords(reader, mediaId))
+                        val vector = if (words.isEmpty()) null else embedWords(words)
+                        if (vector == null && words.isNotEmpty() && !embedder.isLoaded) return@coroutineScope Slot.NO_MODEL
+                        dao.upsertText(TextEntity(mediaId, ScreenText.READ_BY, words, vector))
+                        todo.remove(mediaId)
+                        read++
+                        if (vector != null) {
+                            withWords++
+                            vectorsStale = true
+                        }
+                    }
+                    Slot.MORE
+                } }
+                if (slot == Slot.NO_MODEL) return true
+            }
+            return true
+        } finally {
+            reader.close()
+            if (read > 0) Log.i(TAG, "Read $read screenshots ($withWords with words to search) in ${clock() - started} ms; ${todo.size} left")
+        }
+    }
+
+    /** The words ML Kit reads on photo [mediaId], at full size; null if it can't be read. */
+    private suspend fun readWords(reader: ScreenText, mediaId: Long): String? {
+        val bitmap = withContext(Dispatchers.IO) { library.bitmapToRead(mediaId, ScreenText.MAX_PIXELS) } ?: return null
+        return try {
+            reader.read(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /** [words] as a vector, cut to what the model takes: halved on a refusal, as memory search does. */
+    private suspend fun embedWords(words: String): ByteArray? {
+        var body = words.take(ScreenText.MAX_CHARS)
+        while (true) {
+            embedder.embedDocument(body)?.let { return Int8Vectors.quantize(it) }
+            if (!embedder.isLoaded || body.length <= ScreenText.MIN_SENT_CHARS) return null
+            body = body.take(body.length / 2)
         }
     }
 
@@ -436,9 +504,13 @@ class GalleryIndex(
 
     @Volatile
     private var vectorsStale = true
-    /** Side by side, one per vector: whose it is, and for a video's frame, its moment (-1 for a photo). */
+    /**
+     * Side by side, one per vector: whose it is, for a video's frame its moment (-1 for a photo),
+     * and whether it's a screenshot's words rather than a picture ([ScreenText]).
+     */
     private var ids = LongArray(0)
     private var moments = LongArray(0)
+    private var words = BooleanArray(0)
     private var vectors = ByteArray(0)
     private var norms = IntArray(0)
 
@@ -454,7 +526,7 @@ class GalleryIndex(
         return vectorsLock.withLock {
             withContext(Dispatchers.Default) {
                 if (vectorsStale) loadVectors()
-                perItem(PhotoRanking.rank(vector, LongArray(ids.size) { it.toLong() }, vectors, norms))
+                perItem(PhotoRanking.rank(vector, LongArray(ids.size) { it.toLong() }, vectors, norms, words = words))
             }
         }.also { Log.i(TAG, "\"${LogText.of(query)}\": ${it.size} of ${ids.size} vectors in ${clock() - started} ms (query $embedMs ms)") }
     }
@@ -492,10 +564,45 @@ class GalleryIndex(
             withContext(Dispatchers.Default) {
                 if (vectorsStale) loadVectors()
                 val scores = PhotoRanking.scores(vector, vectors, norms, ids.size) ?: return@withContext emptyList()
+                // A screenshot once, by its picture or its words, whichever is closer.
                 ids.indices.filter { moments[it] < 0 }
-                    .sortedByDescending { scores[it] }
+                    .map { PhotoHit(ids[it], PhotoRanking.listed(scores[it], words[it])) }
+                    .sortedByDescending { it.similarity }
+                    .distinctBy { it.mediaId }
                     .take(limit)
-                    .map { PhotoHit(ids[it], scores[it]) }
+            }
+        }
+    }
+
+    /** A query's raw scores, for calibrating the bar for words ([rawScores]). */
+    internal class RawScores(val bestPicture: Float, val pictures: Map<Long, Float>, val words: Map<Long, Float>)
+
+    /** The screenshots' words that are searched: for the debug `screentext` probe. */
+    internal suspend fun screenWords(): List<TextEntity> = dao.texts(ScreenText.READ_BY)
+
+    /**
+     * For calibrating [PhotoRanking.WORDS_MIN] (debug `screentext` probe): [query]'s raw scores,
+     * the best picture's, and the picture's and the words' of each screenshot with words. Null
+     * when the model won't load.
+     */
+    internal suspend fun rawScores(query: String): RawScores? {
+        val vector = embedder.embedQuery(query)?.let(Int8Vectors::quantize) ?: return null
+        return vectorsLock.withLock {
+            withContext(Dispatchers.Default) {
+                if (vectorsStale) loadVectors()
+                val scores = PhotoRanking.scores(vector, vectors, norms, ids.size) ?: return@withContext null
+                var bestPicture = -1f
+                val pictures = HashMap<Long, Float>()
+                val byWords = HashMap<Long, Float>()
+                for (i in ids.indices) {
+                    if (words[i]) {
+                        byWords[ids[i]] = scores[i]
+                    } else {
+                        bestPicture = maxOf(bestPicture, scores[i])
+                        pictures[ids[i]] = maxOf(pictures[ids[i]] ?: -1f, scores[i])
+                    }
+                }
+                RawScores(bestPicture, pictures.filterKeys { it in byWords }, byWords)
             }
         }
     }
@@ -507,7 +614,7 @@ class GalleryIndex(
             withContext(Dispatchers.Default) {
                 if (vectorsStale) loadVectors()
                 val scores = PhotoRanking.scores(vector, vectors, norms, ids.size) ?: return@withContext emptyList()
-                perItem(ids.indices.map { PhotoHit(it.toLong(), scores[it]) }.sortedByDescending { it.similarity })
+                perItem(ids.indices.map { PhotoHit(it.toLong(), PhotoRanking.listed(scores[it], words[it])) }.sortedByDescending { it.similarity })
             }
         }
     }
@@ -526,7 +633,12 @@ class GalleryIndex(
                 val picked = ids.indices.filter { ids[it] in wanted }
                 val subVectors = ByteArray(picked.size * dims)
                 picked.forEachIndexed { n, i -> vectors.copyInto(subVectors, n * dims, i * dims, (i + 1) * dims) }
-                perItem(PhotoRanking.rank(vector, LongArray(picked.size) { picked[it].toLong() }, subVectors, IntArray(picked.size) { norms[picked[it]] }))
+                perItem(
+                    PhotoRanking.rank(
+                        vector, LongArray(picked.size) { picked[it].toLong() }, subVectors, IntArray(picked.size) { norms[picked[it]] },
+                        words = BooleanArray(picked.size) { words[picked[it]] },
+                    ),
+                )
             }
         }
         unloadWhenIdle()
@@ -563,25 +675,30 @@ class GalleryIndex(
         vectorsStale = false
         val rows = dao.vectors(GalleryModel.MODEL_ID)
         val frames = dao.frameVectors(GalleryModel.MODEL_ID)
-        val total = rows.size + frames.size
+        val texts = dao.textVectors(ScreenText.READ_BY)
+        val total = rows.size + frames.size + texts.size
         val dims = Int8Vectors.DIMENSIONS
         val newIds = LongArray(total)
         val newMoments = LongArray(total)
+        val newWords = BooleanArray(total)
         val newVectors = ByteArray(total * dims)
         val newNorms = IntArray(total)
         var size = 0
-        fun add(mediaId: Long, atMs: Long, embedding: ByteArray) {
+        fun add(mediaId: Long, atMs: Long, embedding: ByteArray, isWords: Boolean = false) {
             if (embedding.size != dims) return
             newIds[size] = mediaId
             newMoments[size] = atMs
+            newWords[size] = isWords
             embedding.copyInto(newVectors, size * dims)
             newNorms[size] = Int8Vectors.squaredNorm(embedding)
             size++
         }
         rows.forEach { add(it.mediaId, -1, it.embedding) }
         frames.forEach { add(it.mediaId, it.atMs, it.embedding) }
+        texts.forEach { add(it.mediaId, -1, it.embedding, isWords = true) }
         ids = newIds.copyOf(size)
         moments = newMoments.copyOf(size)
+        words = newWords.copyOf(size)
         vectors = newVectors
         norms = newNorms
     }
@@ -589,6 +706,7 @@ class GalleryIndex(
     /** Forgets every vector and photo; the next [start] indexes from scratch. */
     suspend fun clear() {
         pause()
+        dao.clearTexts()
         dao.clear()
         vectorsStale = true
         _status.value = Status()

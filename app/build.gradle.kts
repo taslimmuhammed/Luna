@@ -316,6 +316,9 @@ dependencies {
     implementation(libs.firebase.config)
     implementation(libs.mlkit.genai.prompt)
     implementation(libs.mlkit.genai.speech)
+    // Reads the words on screenshots for photo search (gallery/ScreenText). The bundled model, a
+    // few MB, rather than Play Services' download: it works from the first index, offline.
+    implementation(libs.mlkit.text.recognition)
     // Firebase AI Logic's function calls carry their arguments as kotlinx JSON.
     implementation(libs.kotlinx.serialization.json)
 

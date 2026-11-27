@@ -81,6 +81,13 @@ class GalleryEmbedder(
     /** A normalised vector for what someone typed, with the model's search-query prompt. */
     suspend fun embedQuery(text: String): FloatArray? = compute(InputData.Text(GalleryModel.QUERY_PREFIX + text.trim()))
 
+    /**
+     * The words read off a screenshot ([ScreenText]), as a document, while photos are indexed: a
+     * normalised vector, or null on failure. Unlike [embedText] it doesn't hold the engine, which
+     * [release] closes as after the pictures.
+     */
+    suspend fun embedDocument(text: String): FloatArray? = compute(InputData.Text(GalleryModel.DOCUMENT_PREFIX + text))
+
     /** For memory search: a normalised vector for [text] as given (the caller adds the task prompt). */
     suspend fun embedText(text: String): FloatArray? {
         textHeld = true

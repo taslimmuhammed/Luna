@@ -168,6 +168,25 @@ data class FrameEntity(
 /** A video frame's vector, for the search scan. */
 data class FrameVector(val mediaId: Long, val atMs: Long, val embedding: ByteArray)
 
+/**
+ * The words on a screenshot ([ScreenText]), read by [readBy], and their vector from the photo
+ * model's text side, searched beside the picture's own; null when it has too few words to
+ * search. Deleting the photo deletes it.
+ */
+@Entity(
+    tableName = "texts",
+    foreignKeys = [ForeignKey(entity = PhotoEntity::class, parentColumns = ["mediaId"], childColumns = ["mediaId"], onDelete = ForeignKey.CASCADE)],
+)
+data class TextEntity(
+    @PrimaryKey val mediaId: Long,
+    val readBy: String,
+    val text: String,
+    val embedding: ByteArray?,
+) {
+    override fun equals(other: Any?): Boolean = other is TextEntity && other.mediaId == mediaId && other.readBy == readBy
+    override fun hashCode(): Int = mediaId.hashCode()
+}
+
 /** A photo's document score ([DocumentPhotos]). */
 data class DocScore(val mediaId: Long, val docScore: Float)
 
@@ -323,6 +342,31 @@ interface PhotoDao {
     @Query("DELETE FROM photos")
     suspend fun clear()
 
+    // --- The words on screenshots ([TextEntity]) ---
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertText(text: TextEntity)
+
+    /** Screenshots already read by [readBy], with words or without. */
+    @Query("SELECT mediaId FROM texts WHERE readBy = :readBy")
+    suspend fun textsReadBy(readBy: String): List<Long>
+
+    @Query("SELECT t.mediaId, t.embedding FROM texts t JOIN photos p ON p.mediaId = t.mediaId WHERE t.readBy = :readBy AND t.embedding IS NOT NULL")
+    suspend fun textVectors(readBy: String): List<PhotoVector>
+
+    @Query("SELECT * FROM texts WHERE readBy = :readBy AND embedding IS NOT NULL")
+    suspend fun texts(readBy: String): List<TextEntity>
+
+    /** Edited photos: their words are read again. */
+    @Query("DELETE FROM texts WHERE mediaId IN (:ids)")
+    suspend fun deleteTexts(ids: List<Long>)
+
+    @Query("DELETE FROM texts WHERE mediaId NOT IN (SELECT mediaId FROM photos)")
+    suspend fun deleteOrphanTexts()
+
+    @Query("DELETE FROM texts")
+    suspend fun clearTexts()
+
     /** Photos whose faces haven't been looked for by [model], newest first. */
     @Query("SELECT * FROM photos WHERE (facesModel IS NULL OR facesModel != :model) AND durationMs IS NULL ORDER BY dateTaken DESC LIMIT :limit")
     suspend fun facesPending(model: String, limit: Int): List<PhotoEntity>
@@ -439,8 +483,8 @@ interface ContactFaceDao {
  * the user named, which can't be, so from 2 on every schema change gets a real migration.
  */
 @Database(
-    entities = [PhotoEntity::class, PersonEntity::class, FaceEntity::class, FrameEntity::class, ContactFaceEntity::class, ContactDeclineEntity::class],
-    version = 7,
+    entities = [PhotoEntity::class, PersonEntity::class, FaceEntity::class, FrameEntity::class, ContactFaceEntity::class, ContactDeclineEntity::class, TextEntity::class],
+    version = 8,
     exportSchema = true,
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -536,12 +580,23 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        /** The words on screenshots. Nothing is read here: the next indexing pass reads them. */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `texts` (`mediaId` INTEGER NOT NULL, `readBy` TEXT NOT NULL, `text` TEXT NOT NULL, `embedding` BLOB, " +
+                        "PRIMARY KEY(`mediaId`), " +
+                        "FOREIGN KEY(`mediaId`) REFERENCES `photos`(`mediaId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(context, GalleryDatabase::class.java, FILE_NAME)
                 .setDriver(BundledSQLiteDriver())
                 .setQueryCoroutineContext(Dispatchers.IO)
                 // No destructive fallback any more: from version 2 it holds names the user gave.
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build()
     }
 }

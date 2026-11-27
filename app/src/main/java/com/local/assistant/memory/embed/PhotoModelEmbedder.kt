@@ -36,7 +36,7 @@ class PhotoModelEmbedder(private val model: GalleryEmbedder) : Embedder {
      * the text is capped up front and halved on refusal, as [LiteRtEmbedder] does.
      */
     override suspend fun embed(text: String, kind: EmbedKind): FloatArray? {
-        val prefix = if (kind == EmbedKind.QUERY) GalleryModel.QUERY_PREFIX else DOCUMENT_PREFIX
+        val prefix = if (kind == EmbedKind.QUERY) GalleryModel.QUERY_PREFIX else GalleryModel.DOCUMENT_PREFIX
         var body = (if (kind == EmbedKind.QUERY) text.trim() else text).take(MAX_CHARS)
         while (true) {
             model.embedText(prefix + body)?.let { return it }
@@ -53,9 +53,6 @@ class PhotoModelEmbedder(private val model: GalleryEmbedder) : Embedder {
     private companion object {
         /** Its own name, not [GalleryModel.MODEL_ID]: text vectors don't depend on the image budget. */
         val MODEL_ID = "${GalleryModel.KEY}@${Int8Vectors.DIMENSIONS}"
-
-        /** EmbeddingGemma's document prompt, from its model card, as for the older model. */
-        const val DOCUMENT_PREFIX = "title: none | text: "
 
         const val MAX_CHARS = 1_200
         const val MIN_CHARS = 150

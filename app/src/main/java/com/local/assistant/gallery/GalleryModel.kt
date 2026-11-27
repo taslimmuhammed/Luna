@@ -44,6 +44,9 @@ object GalleryModel {
      */
     const val QUERY_PREFIX = "task: search result | query: "
 
+    /** Its document prompt, from the same card: memory search's memories, and screenshots' words ([ScreenText]). */
+    const val DOCUMENT_PREFIX = "title: none | text: "
+
     /**
      * Soft tokens per image: the bundle has signatures for 70 and 140. 70 is the one Google
      * benchmarked (119 ms per image on an S26 Ultra's GPU, 175 ms on its CPU); on the Mac it put
