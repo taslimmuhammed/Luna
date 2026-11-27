@@ -94,9 +94,10 @@ class AssistViewModel(
 
     /**
      * A question sent but not yet in the chat: waiting for an earlier reply to finish, or being
-     * stored. [storedId] is its message once stored; it shows until the chat does.
+     * stored. [storedId] is its message once stored; it shows until the chat does. [attachment]:
+     * its recording, or the photo it's about.
      */
-    data class Pending(val text: String, val audioPath: String?, val durationMs: Long?, val storedId: Long? = null)
+    data class Pending(val text: String, val attachment: ChatSender.Attachment?, val storedId: Long? = null)
 
     /** A tool waiting on a permission dialog, e.g. contacts for "call amma". */
     val permissionRequests: SharedFlow<PermissionBroker.Request> = permissions.requests
@@ -145,6 +146,14 @@ class AssistViewModel(
     val level: StateFlow<Float> = _level.asStateFlow()
 
     val speaking: StateFlow<Boolean> = speaker.speaking
+
+    private val _photo = MutableStateFlow<String?>(null)
+
+    /**
+     * A photo, taken with the camera or picked, to go with the next question, typed or said; its
+     * file. One at a time: Gemini Nano looks at one image a question.
+     */
+    val photo: StateFlow<String?> = _photo.asStateFlow()
 
     private val _input = MutableStateFlow(Input.VOICE)
     val input: StateFlow<Input> = _input.asStateFlow()
@@ -297,10 +306,50 @@ class AssistViewModel(
         _input.value = Input.TEXT
     }
 
+    /** [text] may be empty with a photo: the photo is the question. */
     fun sendText(text: String) {
-        if (text.isBlank()) return
+        val photo = _photo.value
+        if (text.isBlank() && photo == null) return
         stopSpeaking()
-        send(text.trim(), attachment = null, voice = false)
+        _photo.value = null
+        send(text.trim(), attachment = photo?.let { ChatSender.Attachment(it, AttachmentKind.IMAGE) }, voice = false)
+    }
+
+    fun attachImage(uri: android.net.Uri) = attachImageFrom { attachments.importImage(uri) }
+
+    /** Where the camera app is to put the photo it takes ([com.local.assistant.ui.chat.rememberCamera]). */
+    fun newCapture(): AttachmentStore.Capture = attachments.newCapture()
+
+    fun attachPhotoTaken(file: java.io.File) = attachImageFrom { attachments.importCapture(file) }
+
+    private fun attachImageFrom(import: suspend () -> java.io.File) {
+        viewModelScope.launch {
+            runCatching { import() }
+                .onSuccess { file ->
+                    if (closed) {
+                        attachments.delete(file.absolutePath)
+                        return@onSuccess
+                    }
+                    discardPhoto()
+                    _photo.value = file.absolutePath
+                    _notice.value = null
+                }
+                .onFailure { _notice.value = it.message ?: "Couldn't add that photo." }
+        }
+    }
+
+    fun discardPhoto() {
+        _photo.value?.let(attachments::delete)
+        _photo.value = null
+    }
+
+    fun noCamera() {
+        _notice.value = ChatViewModel.NO_CAMERA
+    }
+
+    /** The unlock for the camera or a photo was cancelled. */
+    fun photoUnlockCancelled() {
+        _notice.value = "Unlock your phone to add a photo."
     }
 
     /** The stop button: the reply stops where it is, and so does the voice. */
@@ -371,6 +420,18 @@ class AssistViewModel(
             nothingHeard = false
             return
         }
+        // About a photo: it goes with the words said, and the recording doesn't (a message has
+        // one attachment, and Gemini Nano can't hear one anyway).
+        _photo.value?.let { photo ->
+            attachments.delete(recording.file.absolutePath)
+            if (transcript.isNullOrBlank()) {
+                _notice.value = "Didn't catch that. Tap the mic and ask about the photo."
+                return
+            }
+            _photo.value = null
+            send(transcript, ChatSender.Attachment(photo, AttachmentKind.IMAGE), voice = true)
+            return
+        }
         send(
             text = transcript.orEmpty(),
             attachment = ChatSender.Attachment(recording.file.absolutePath, AttachmentKind.AUDIO, recording.durationMs),
@@ -384,7 +445,7 @@ class AssistViewModel(
         // and no alarm (RoutingEvalTest with -e voice: 22/32 actions with the line, 32/32 without).
         val speak = voice && !_muted.value
         _notice.value = null
-        _pending.value = Pending(text, attachment?.path, attachment?.durationMs)
+        _pending.value = Pending(text, attachment)
         _awaitingSpeech.value = speak
         sendJob = viewModelScope.launch {
             var started = false
@@ -396,9 +457,12 @@ class AssistViewModel(
                 // Not in the chat list; stored, and learned from, like any other chat.
                 unlockForVoice = speak
                 val locked = onLockScreen()
+                // With a photo, not the screen too: the photo is what's asked about, and Gemini Nano
+                // looks at one image a question.
+                val aboutPhoto = attachment?.kind == AttachmentKind.IMAGE
                 started = sender.send(
                     _chatId.value, text, attachment, owner = this@AssistViewModel, listener = listener, hidden = true, locked = locked,
-                    screen = if (locked) null else screen(),
+                    screen = if (locked || aboutPhoto) null else screen(),
                 )
             } finally {
                 if (!started) {
@@ -471,6 +535,8 @@ class AssistViewModel(
     override fun onCleared() {
         closed = true
         screen()?.let(releaseScreen)
+        // Added but never asked about.
+        discardPhoto()
         endOfSpeech?.cancel()
         if (_listening.value) recorder.cancel()
         chunker = null

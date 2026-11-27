@@ -62,6 +62,9 @@ class AssistActivity : FragmentActivity() {
      */
     private var awaitingPermission = false
 
+    /** The camera or the photo picker is up over the panel: the overlay stays while it is. */
+    private var awaitingPhoto = false
+
     /** The system is blurring what's behind the panel. */
     private val blurred = mutableStateOf(false)
 
@@ -112,6 +115,18 @@ class AssistActivity : FragmentActivity() {
                             // Given up on while out of sight (the user went home from it): close, as onStop would have.
                             if (!asking && !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) close()
                         },
+                        // Neither the camera nor the photo picker shows over the lock screen, and
+                        // the photos are the user's: unlocked first.
+                        onLeaveForPhoto = { open ->
+                            afterUnlock(cancelled = viewModel::photoUnlockCancelled) {
+                                awaitingPhoto = true
+                                open()
+                            }
+                        },
+                        onBackFromPhoto = {
+                            awaitingPhoto = false
+                            if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) close()
+                        },
                     )
                 }
             }
@@ -139,7 +154,7 @@ class AssistActivity : FragmentActivity() {
         inView = false
         super.onStop()
         // Out of sight, out of the way: an overlay left behind would sit in its own task.
-        if (!isChangingConfigurations && !awaitingUnlock && !awaitingPermission && !isFinishing) close()
+        if (!isChangingConfigurations && !awaitingUnlock && !awaitingPermission && !awaitingPhoto && !isFinishing) close()
     }
 
     override fun onDestroy() {

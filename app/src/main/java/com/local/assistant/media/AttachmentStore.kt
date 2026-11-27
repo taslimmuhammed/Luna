@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -24,6 +25,31 @@ class AttachmentStore(private val context: Context) {
     private val dir: File = File(context.filesDir, "attachments").apply { mkdirs() }
 
     fun newAudioFile(): File = File(dir, "${UUID.randomUUID()}.wav")
+
+    /** Where the camera app puts a photo being taken: [file], handed to it as [uri], which it may write. */
+    class Capture(val file: File, val uri: Uri)
+
+    /**
+     * A file for the camera app to write the photo it takes into ([com.local.assistant.ui.chat.rememberCamera]).
+     * In a folder of its own, the only one the file provider lets the camera write to. Any photo
+     * left there by a capture that never came back goes.
+     */
+    fun newCapture(): Capture {
+        val captures = File(context.filesDir, CAPTURE_DIRECTORY).apply { mkdirs() }
+        captures.listFiles()?.forEach { it.delete() }
+        val file = File(captures, "${UUID.randomUUID()}.jpg")
+        return Capture(file, FileProvider.getUriForFile(context, "${context.packageName}$CAPTURE_AUTHORITY", file))
+    }
+
+    /**
+     * The photo the camera app took, brought in as a picked one is ([importImage]): upright and
+     * scaled down. The camera's full-size file goes either way.
+     */
+    suspend fun importCapture(file: File): File = try {
+        importImage(Uri.fromFile(file))
+    } finally {
+        withContext(Dispatchers.IO) { file.delete() }
+    }
 
     /**
      * Copies the picked image in, rotated upright and scaled down to
@@ -101,6 +127,10 @@ class AttachmentStore(private val context: Context) {
 
     companion object {
         const val MAX_DOCUMENT_BYTES = 100L * 1024 * 1024
+
+        /** The camera's folder (res/xml/shared_files.xml), and the provider that hands it out. */
+        private const val CAPTURE_DIRECTORY = "camera"
+        private const val CAPTURE_AUTHORITY = ".share"
 
         private val UUID_PREFIX = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-")
 

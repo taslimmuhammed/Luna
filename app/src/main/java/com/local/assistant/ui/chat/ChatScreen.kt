@@ -55,6 +55,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Stop
@@ -270,6 +271,13 @@ fun ChatScreen(
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> uri?.let(viewModel::attachImage) }
+
+    // A photo taken now, with the phone's camera app.
+    val camera = rememberCamera(
+        newCapture = viewModel::newCapture,
+        onResult = { photo -> photo?.let(viewModel::attachPhotoTaken) },
+        onNoCamera = viewModel::noCamera,
+    )
 
     // Read by the app itself (DocumentReader), so offered with any model, vision or not.
     val documentPicker = rememberLauncherForActivityResult(
@@ -633,6 +641,7 @@ fun ChatScreen(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
                     },
+                    onTakePhoto = camera,
                     onPickDocument = { documentPicker.launch(DOCUMENT_TYPES) },
                     onDiscardAttachment = viewModel::discardPendingAttachment,
                     onStartRecording = {
@@ -780,6 +789,7 @@ private fun Composer(
     onTyping: (String) -> Unit,
     onStop: () -> Unit,
     onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
     onPickDocument: () -> Unit,
     onDiscardAttachment: () -> Unit,
     onStartRecording: () -> Unit,
@@ -814,7 +824,8 @@ private fun Composer(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (recording == null) {
-                // A photo (when the model can see) or a document: one button, as on WhatsApp.
+                // A photo, taken now or picked (when the model can see), or a document: one
+                // button, as on WhatsApp.
                 var attachMenu by remember { mutableStateOf(false) }
                 Box {
                     GlassRoundButton(
@@ -825,6 +836,14 @@ private fun Composer(
                         size = COMPOSER_HEIGHT,
                     )
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Camera") },
+                            leadingIcon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
+                            onClick = {
+                                attachMenu = false
+                                onTakePhoto()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("Photo") },
                             leadingIcon = { Icon(Icons.Outlined.Image, contentDescription = null) },

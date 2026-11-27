@@ -1,3 +1,4 @@
 - location based reminders looks at last recorder location if locations is not on
-- better hackathon pichting ideas
-- without AI core?
+- camera for images
+- battery does not open the requiured settings
+- screenshot access

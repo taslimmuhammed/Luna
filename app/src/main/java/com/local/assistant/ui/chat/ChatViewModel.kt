@@ -463,15 +463,27 @@ class ChatViewModel(
         _error.value = null
     }
 
-    fun attachImage(uri: Uri) {
+    fun attachImage(uri: Uri) = attachImageFrom { attachments.importImage(uri) }
+
+    /** Where the camera app is to put the photo it takes ([rememberCamera]). */
+    fun newCapture(): AttachmentStore.Capture = attachments.newCapture()
+
+    /** The photo just taken with the camera, to send with the next message. */
+    fun attachPhotoTaken(file: java.io.File) = attachImageFrom { attachments.importCapture(file) }
+
+    private fun attachImageFrom(import: suspend () -> java.io.File) {
         viewModelScope.launch {
             discardPendingAttachment()
-            runCatching { attachments.importImage(uri) }
+            runCatching { import() }
                 .onSuccess {
                     _pendingAttachment.value = PendingAttachment(it.absolutePath, AttachmentKind.IMAGE)
                 }
                 .onFailure { _error.value = it.message ?: "Could not attach that image" }
         }
+    }
+
+    fun noCamera() {
+        _error.value = NO_CAMERA
     }
 
     /**
@@ -633,6 +645,9 @@ class ChatViewModel(
     companion object {
         /** How long other audio stays paused after the chat falls quiet. */
         private const val FOCUS_GRACE_MS = 800L
+
+        /** The phone has no camera app for [rememberCamera] to open. */
+        const val NO_CAMERA = "There's no camera app on this phone to take a photo with."
 
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
             initializer {

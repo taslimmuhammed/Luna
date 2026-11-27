@@ -303,7 +303,8 @@
         </receiver>
 
         <!-- Screenshots shared to WhatsApp, email or messages (device/AndroidPhone): read only by
-             the app they're sent to, for the one file, through a grant on the share intent. -->
+             the app they're sent to, for the one file, through a grant on the share intent. And
+             the camera app's one photo, written through a grant on its capture intent. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.share"

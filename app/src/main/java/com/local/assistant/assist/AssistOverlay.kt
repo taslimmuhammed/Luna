@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
@@ -56,8 +57,10 @@ import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -126,9 +129,11 @@ import com.local.assistant.data.db.MessageEntity
 import com.local.assistant.data.db.Role
 import com.local.assistant.device.PermissionBroker
 import com.local.assistant.llm.EngineState
+import com.local.assistant.ui.chat.AttachedImage
 import com.local.assistant.ui.chat.MarkdownText
 import com.local.assistant.ui.chat.MemoryChips
 import com.local.assistant.ui.chat.ToolPermissionRequests
+import com.local.assistant.ui.chat.rememberCamera
 import com.local.assistant.ui.chat.ThinkingIndicator
 import com.local.assistant.ui.privacy.HiddenDetails
 import com.local.assistant.ui.privacy.rememberShown
@@ -163,6 +168,13 @@ fun AssistOverlay(
     onOpenSettings: () -> Unit,
     /** A tool's permission screen is up (Health Connect's covers the panel), or has gone. */
     onAskingPermission: (Boolean) -> Unit = {},
+    /**
+     * The camera or the photo picker is to open over the panel: [open][it] runs once the phone is
+     * unlocked (neither shows over the lock screen), and the panel stays up meanwhile.
+     */
+    onLeaveForPhoto: (open: () -> Unit) -> Unit = { it() },
+    /** Back from the camera or the photo picker, with a photo or without. */
+    onBackFromPhoto: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -182,6 +194,7 @@ fun AssistOverlay(
     val engine by viewModel.engineState.collectAsStateWithLifecycle()
     val chatId by viewModel.chatId.collectAsStateWithLifecycle()
     val askForNotifications by viewModel.askForNotifications.collectAsStateWithLifecycle()
+    val photo by viewModel.photo.collectAsStateWithLifecycle()
 
     // ---- Permissions: the microphone, a tool's (contacts), and notifications for a reminder ----
 
@@ -208,6 +221,36 @@ fun AssistOverlay(
         val needed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         if (needed) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) else viewModel.notificationsAsked()
+    }
+
+    // ---- A photo to ask about: taken now, or one from the gallery ----
+
+    val camera = rememberCamera(
+        newCapture = viewModel::newCapture,
+        onResult = { taken ->
+            onBackFromPhoto()
+            taken?.let(viewModel::attachPhotoTaken)
+        },
+        onNoCamera = {
+            onBackFromPhoto()
+            viewModel.noCamera()
+        },
+    )
+    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        onBackFromPhoto()
+        uri?.let(viewModel::attachImage)
+    }
+    val takePhoto: () -> Unit = {
+        viewModel.stopSpeaking()
+        onLeaveForPhoto(camera)
+    }
+    val choosePhoto: () -> Unit = {
+        viewModel.stopSpeaking()
+        onLeaveForPhoto { gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+    }
+    // Talking, it listens as soon as the photo is in, for the question about it.
+    LaunchedEffect(photo) {
+        if (photo != null && input == AssistViewModel.Input.VOICE && !viewModel.listening.value) listen()
     }
 
     // ---- In and out ----
@@ -383,6 +426,7 @@ fun AssistOverlay(
                         )
                         listening -> Headline("Listening…", "Ask anything. It sends when you pause.")
                         input == AssistViewModel.Input.TEXT -> Headline("How can I help?", null)
+                        photo != null -> Headline("How can I help?", "Tap the mic and ask about the photo.")
                         else -> Headline("How can I help?", "Tap the mic and ask.")
                     }
 
@@ -398,6 +442,10 @@ fun AssistOverlay(
                             Caption("Checking for Gemini Nano. It answers as soon as it's ready.")
                         }
                         notice?.let { Caption(it, onClick = viewModel::dismissNotice) }
+                        // The photo being asked about, or the ways to add one while nothing else is going on.
+                        if (photo != null || (!listening && !busy)) {
+                            PhotoRow(photo, onCamera = takePhoto, onGallery = choosePhoto, onRemove = viewModel::discardPhoto)
+                        }
 
                         if (input == AssistViewModel.Input.VOICE) {
                             VoiceControls(
@@ -416,6 +464,7 @@ fun AssistOverlay(
                         } else {
                             TextControls(
                                 busy = busy,
+                                hasPhoto = photo != null,
                                 canTalk = viewModel.hearsAudio(),
                                 onSend = viewModel::sendText,
                                 onStop = viewModel::stop,
@@ -661,7 +710,7 @@ private fun Transcript(
         val asking = messages.lastOrNull()?.takeIf { streaming != null && it.role == Role.USER }
         messages.forEach { message ->
             when (message.role) {
-                Role.USER -> Question(message.text, message.attachmentKind == AttachmentKind.AUDIO, message.attachmentDurationMs)
+                Role.USER -> Question(message.text, message.attachmentKind, message.attachmentPath, message.attachmentDurationMs)
                 Role.ASSISTANT -> Answer(message.text)
                 Role.TOOL -> Unit
             }
@@ -675,7 +724,7 @@ private fun Transcript(
                 )
             }
         }
-        pending?.let { Question(it.text, it.audioPath != null, it.durationMs) }
+        pending?.let { Question(it.text, it.attachment?.kind, it.attachment?.path, it.attachment?.durationMs) }
         when {
             waiting || streaming?.isEmpty() == true ->
                 ThinkingIndicator(label = step, loading = modelLoading)
@@ -698,11 +747,16 @@ private fun Transcript(
 
 /**
  * What the user asked: their words, or their voice message, in the app's grey bubble. A voice
- * message written down has its words under it, in the same bubble.
+ * message written down has its words under it, in the same bubble. A photo asked about shows
+ * above the words.
  */
 @Composable
-private fun Question(text: String, voice: Boolean, durationMs: Long?) {
+private fun Question(text: String, kind: AttachmentKind?, path: String?, durationMs: Long?) {
+    val voice = kind == AttachmentKind.AUDIO
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalAlignment = Alignment.End) {
+        if (kind == AttachmentKind.IMAGE && path != null) {
+            AttachedImage(path, Modifier.padding(bottom = if (text.isNotBlank()) 4.dp else 0.dp), maxHeight = 160)
+        }
         if (voice) {
             Column(
                 Modifier
@@ -912,10 +966,59 @@ private fun RoundAction(icon: ImageVector, label: String, onClick: () -> Unit) {
     GlassRoundButton(icon, label, onClick, size = 52.dp)
 }
 
+/**
+ * A photo for the next question. Before one is added: the camera, or one from the gallery. Once
+ * added: the photo, small, with a cross to take it off.
+ */
+@Composable
+private fun PhotoRow(photo: String?, onCamera: () -> Unit, onGallery: () -> Unit, onRemove: () -> Unit) {
+    if (photo != null) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AttachedImage(photo, maxHeight = 72)
+            Text(
+                "The question goes with this photo.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.TextSecondary,
+                modifier = Modifier.weight(1f),
+            )
+            GlassRoundButton(Icons.Outlined.Close, "Remove the photo", onRemove, size = 36.dp, iconSize = 16.dp)
+        }
+    } else {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        ) {
+            GlassPill(Icons.Outlined.PhotoCamera, "Camera", onCamera)
+            GlassPill(Icons.Outlined.Image, "Photo", onGallery)
+        }
+    }
+}
+
+@Composable
+private fun GlassPill(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .liquidGlass(CircleShape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = AppColors.TextPrimary, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelLarge, color = AppColors.TextPrimary)
+    }
+}
+
 /** Typing instead: the app's composer, with the mic to go back to talking. */
 @Composable
 private fun TextControls(
     busy: Boolean,
+    /** A photo is to go with the question: it can go without words. */
+    hasPhoto: Boolean,
     canTalk: Boolean,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
@@ -929,7 +1032,7 @@ private fun TextControls(
         keyboard?.show()
     }
     val submit = {
-        if (text.isNotBlank() && !busy) {
+        if ((text.isNotBlank() || hasPhoto) && !busy) {
             onSend(text)
             text = ""
         }
@@ -949,7 +1052,7 @@ private fun TextControls(
                 .padding(horizontal = 18.dp, vertical = 14.dp),
         ) {
             if (text.isEmpty()) {
-                Text("Ask anything", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextSecondary)
+                Text(if (hasPhoto) "Ask about the photo" else "Ask anything", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextSecondary)
             }
             BasicTextField(
                 value = text,
@@ -962,7 +1065,7 @@ private fun TextControls(
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
             )
         }
-        val enabled = busy || text.isNotBlank()
+        val enabled = busy || text.isNotBlank() || hasPhoto
         Box(
             Modifier
                 .size(52.dp)

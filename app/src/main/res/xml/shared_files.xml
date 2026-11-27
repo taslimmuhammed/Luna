@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- What the file provider may hand out (AndroidManifest): only copies made for sharing. -->
+<!-- What the file provider may hand out (AndroidManifest): copies made for sharing, and the file
+     the camera app writes a photo being taken into (media/AttachmentStore.newCapture). -->
 <paths>
     <files-path name="shared" path="shared/" />
+    <files-path name="camera" path="camera/" />
 </paths>
