@@ -879,12 +879,12 @@ private fun LicenceEntries() {
         }
     }
     Entry(
-        "Local Assistant",
-        "Free software under the GNU General Public License v3: you may use, change and share it " +
-            "under that licence. The source code of every version is public.",
+        "Luna",
+        "Open source under the Apache License 2.0: you may use, change and share it under that licence. " +
+            "The source code of every version is public.",
         listOf(
-            "Source code" to "https://github.com/taslimmuhammed/local_assistant_v2",
-            "GNU General Public License v3" to "https://www.gnu.org/licenses/gpl-3.0.html",
+            "Source code" to "https://github.com/taslimmuhammed/Luna",
+            "Apache License 2.0" to "https://www.apache.org/licenses/LICENSE-2.0",
         ),
     )
     Entry(
