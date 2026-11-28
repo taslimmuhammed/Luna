@@ -68,7 +68,7 @@ class NominatimSearch(
     companion object {
         private const val TAG = "NominatimSearch"
         const val ENDPOINT = "https://nominatim.openstreetmap.org/search"
-        private const val USER_AGENT = "LocalAssistant/0.2 (Android, on-device assistant; https://github.com/taslimmuhammed/local_assistant_v2)"
+        private const val USER_AGENT = "Luna/0.4 (Android, on-device assistant; https://github.com/taslimmuhammed/Luna)"
         private const val MIN_GAP_MS = 1_100L
 
         /** Enough for every branch of a chain in a city's box (Bengaluru had 20 DMarts). */
