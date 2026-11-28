@@ -462,12 +462,14 @@ class AppContainer(context: Context) {
 
     /**
      * The mode a new chat starts in, as it would now: what Settings says, but Local until the user
-     * has agreed to what that mode sends, and Local when this build has no cloud.
+     * has agreed to what that mode sends and is signed in, and Local when this build has no cloud.
      */
     fun newChatsMode(): com.local.assistant.hybrid.ChatMode {
         val wanted = settings.newChatsMode
         return when {
             !hybridSetup.cloudAvailable -> com.local.assistant.hybrid.ChatMode.LOCAL
+            // Cloud and Auto run under a Google account; signed out, new chats start Local.
+            !hybridSetup.signedIn -> com.local.assistant.hybrid.ChatMode.LOCAL
             wanted == com.local.assistant.hybrid.ChatMode.AUTO && settings.autoConsented -> wanted
             wanted == com.local.assistant.hybrid.ChatMode.CLOUD && settings.cloudConsented -> wanted
             else -> com.local.assistant.hybrid.ChatMode.LOCAL

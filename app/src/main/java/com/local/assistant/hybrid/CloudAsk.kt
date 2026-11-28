@@ -56,6 +56,11 @@ class CloudAsk(
     suspend fun ask(chatId: Long, question: String, aboutUser: String?, earlier: List<Exchange>, web: Boolean): Answer {
         if (!setup.cloudAvailable) throw Unavailable("Gemini isn't set up or is turned off. Answer yourself, and say your answer may be limited.")
         if (asksLeft() <= 0) throw Unavailable("Today's questions to Gemini are used up. Answer yourself, and say so in a few words.")
+        try {
+            setup.ensureSignedIn()
+        } catch (e: HybridSetup.SignInRequired) {
+            throw Unavailable("Gemini can't be asked: no one is signed in. Answer yourself, and say your answer may be limited.")
+        }
         val prompt = buildString {
             append(SYSTEM)
             // Said only when there is one: told of it otherwise, Gemini writes it into answers.

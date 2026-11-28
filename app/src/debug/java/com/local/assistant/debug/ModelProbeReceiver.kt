@@ -77,6 +77,12 @@ class ModelProbeReceiver : BroadcastReceiver() {
                         mode = com.local.assistant.hybrid.ChatMode.of(intent.getStringExtra("chatmode")) ?: com.local.assistant.hybrid.ChatMode.CLOUD,
                     )
                     "voice" -> VoiceBench(context, ::log).run(download = intent.getBooleanExtra("download", false))
+                    // A demo video's narration in Kokoro's voices: files/narration.txt → files/narration/*.wav
+                    "narrate" -> Narrate(context, ::log).run(
+                        scriptName = intent.getStringExtra("script") ?: "narration.txt",
+                        speaker = intent.getIntExtra("speaker", 3),
+                        speed = intent.getFloatExtra("speed", 1.0f),
+                    )
                     // How screenshots' words score against searches: --ei max 40 [--ez nano true]
                     "screentext" -> ScreenTextProbe(container, ::log).run(
                         max = intent.getIntExtra("max", 40),

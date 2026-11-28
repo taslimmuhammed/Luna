@@ -17,6 +17,19 @@ import com.google.firebase.ai.OnDeviceModelStatus
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.appcheck.appCheck
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.auth
 import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
 import com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderFactory
 import com.google.firebase.remoteconfig.remoteConfig
@@ -40,6 +53,10 @@ import kotlin.coroutines.resumeWithException
  * the on-device app it always was, and Cloud mode says it isn't set up. With one, every request
  * carries an App Check token (Play Integrity, or the debug provider in debug and demo builds), and
  * which model answers is Remote Config's to say, so it can change without a release.
+ *
+ * Cloud and Auto run under the user's Google account, signed in to Firebase Authentication
+ * ([signInWithGoogle]); Firebase AI Logic sends its ID token with each request. Nothing goes to
+ * the cloud signed out ([ensureSignedIn]). Local chats never need an account.
  */
 class HybridSetup(private val context: Context, private val scope: CoroutineScope) {
 
@@ -60,6 +77,27 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
     val nanoProgress: StateFlow<Float?> = _nanoProgress.asStateFlow()
 
     private var download: Job? = null
+
+    /** The Google account Cloud and Auto run under. */
+    data class Account(val email: String?, val name: String?)
+
+    private val _account = MutableStateFlow<Account?>(null)
+
+    /** Who is signed in, or null: Cloud and Auto wait for an account. */
+    val account: StateFlow<Account?> = _account.asStateFlow()
+
+    /** A Google account is signed in (an anonymous one, from an earlier build, doesn't count). */
+    val signedIn: Boolean get() = !configured || googleUser() != null
+
+    /** A cloud request with no one signed in; the message is for the chat. */
+    class SignInRequired : Exception("Sign in with Google to use Cloud and Auto: tap Cloud or Auto above, or go to Settings › Cloud. Local chats need no account.")
+
+    /** How [signInWithGoogle] went: [Failed.message] is for the user; closing the picker is [Cancelled]. */
+    sealed interface SignIn {
+        data object Done : SignIn
+        data object Cancelled : SignIn
+        data class Failed(val message: String) : SignIn
+    }
 
     /** Once, at start: App Check first, so no request ever goes without it. */
     fun start() {
@@ -82,6 +120,9 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
         Firebase.appCheck.installAppCheckProviderFactory(
             if (debug) DebugAppCheckProviderFactory.getInstance() else PlayIntegrityAppCheckProviderFactory.getInstance(),
         )
+        // Signed in before (it lasts until sign-out or the app's data is cleared): shown from the start.
+        runCatching { Firebase.auth.addAuthStateListener { _account.value = googleUser()?.let { Account(it.email, it.displayName) } } }
+            .onFailure { Log.w(TAG, "Firebase Auth didn't start", it) }
         val config = Firebase.remoteConfig
         config.setDefaultsAsync(DEFAULTS)
         config.setConfigSettingsAsync(remoteConfigSettings { minimumFetchIntervalInSeconds = if (BuildConfig.DEBUG) 60 else 3600 })
@@ -89,6 +130,72 @@ class HybridSetup(private val context: Context, private val scope: CoroutineScop
             runCatching { config.fetchAndActivate().await() }.onFailure { Log.i(TAG, "Remote Config not fetched; defaults stand: ${it.javaClass.simpleName}") }
             refreshNano()
         }
+    }
+
+    private fun googleUser(): FirebaseUser? =
+        runCatching { Firebase.auth.currentUser }.getOrNull()?.takeUnless { it.isAnonymous }
+
+    /**
+     * Before any request to Gemini in the cloud (Cloud chats, Auto's questions, web search):
+     * throws [SignInRequired] with no Google account signed in. Firebase refreshes the ID token
+     * itself, so once signed in this needs no connection of its own.
+     */
+    fun ensureSignedIn() {
+        if (!signedIn) throw SignInRequired()
+    }
+
+    /**
+     * Google's account picker, then Firebase Authentication with the account chosen. [activity]
+     * shows the picker. The OAuth web client comes from `google-services.json` (the Google
+     * provider turned on in the console, then the file downloaded again); without it, says so.
+     */
+    suspend fun signInWithGoogle(activity: Context): SignIn {
+        if (!configured) return SignIn.Failed("Cloud mode isn't set up in this build.")
+        val clientId = webClientId()
+            ?: return SignIn.Failed("Google sign-in isn't set up in this build yet: turn on the Google provider in Firebase, then download google-services.json again.")
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(GetSignInWithGoogleOption.Builder(clientId).build())
+            .build()
+        val credential = try {
+            CredentialManager.create(activity).getCredential(activity, request).credential
+        } catch (e: GetCredentialCancellationException) {
+            return SignIn.Cancelled
+        } catch (e: NoCredentialException) {
+            return SignIn.Failed("There's no Google account on this phone. Add one in Android's Settings, then try again.")
+        } catch (e: GetCredentialException) {
+            Log.w(TAG, "Google sign-in failed: ${e.type}", e)
+            return SignIn.Failed("Google sign-in didn't work (${e.type.substringAfterLast('.')}). Try again.")
+        }
+        if (credential !is CustomCredential || credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+            return SignIn.Failed("Google sign-in gave something Luna can't use. Try again.")
+        }
+        return try {
+            val token = GoogleIdTokenCredential.createFrom(credential.data).idToken
+            Firebase.auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
+            Log.i(TAG, "Signed in to Firebase with Google")
+            SignIn.Done
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val code = (e as? FirebaseAuthException)?.errorCode ?: e.javaClass.simpleName
+            Log.w(TAG, "Firebase didn't take the Google sign-in: $code", e)
+            SignIn.Failed("Firebase didn't accept the Google sign-in ($code).")
+        }
+    }
+
+    /** Signs out of Firebase, and forgets the account chosen so the picker asks next time. */
+    suspend fun signOut(context: Context) {
+        if (!configured) return
+        runCatching { Firebase.auth.signOut() }
+        runCatching { CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest()) }
+            .onFailure { Log.i(TAG, "Couldn't clear the chosen account: ${it.javaClass.simpleName}") }
+    }
+
+    /** The OAuth web client the google-services plugin writes from the JSON, when it has one. */
+    private fun webClientId(): String? {
+        @Suppress("DiscouragedApi")
+        val id = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        return if (id == 0) null else context.getString(id).takeIf { it.isNotBlank() }
     }
 
     /** Cloud mode can be used: Firebase is set up and Remote Config hasn't turned it off. */

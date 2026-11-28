@@ -2,6 +2,7 @@ package com.local.assistant.ui.chat
 
 import com.local.assistant.hybrid.AskConfirm
 import com.local.assistant.hybrid.ChatMode
+import com.local.assistant.hybrid.HybridSetup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -89,6 +90,10 @@ class ChatViewModel(
     private val askConfirm: AskConfirm? = null,
     /** How many questions Auto chats may send Gemini a day. */
     private val dailyAsks: () -> Int = { 0 },
+    /** A Google account is signed in, which Cloud and Auto need ([HybridSetup.signedIn]). */
+    private val signedIn: () -> Boolean = { true },
+    /** Google's account picker, shown from the given activity ([HybridSetup.signInWithGoogle]). */
+    private val signInWithGoogle: suspend (android.content.Context) -> HybridSetup.SignIn = { HybridSetup.SignIn.Cancelled },
 ) : ViewModel() {
 
     private val _mode = MutableStateFlow(ChatMode.LOCAL)
@@ -113,6 +118,17 @@ class ChatViewModel(
     /** The first switch to Auto waits on the user reading what it may send ([answerAutoConsent]). */
     val askAutoConsent: StateFlow<Boolean> = _askAutoConsent.asStateFlow()
 
+    private val _askSignIn = MutableStateFlow<ChatMode?>(null)
+
+    /**
+     * Cloud or Auto picked, or a message sent in one, with no Google account signed in: the
+     * screen shows Google's picker ([signIn]), and the mode (and the message) waits on it.
+     */
+    val askSignIn: StateFlow<ChatMode?> = _askSignIn.asStateFlow()
+
+    /** A message sent in a Cloud or Auto chat while signed out: it goes once the user has signed in. */
+    private var heldText: String? = null
+
     /** An Auto question held for the user's say-so: shown with what would be sent. */
     val pendingAsk: StateFlow<AskConfirm.Pending?> = askConfirm?.pending ?: MutableStateFlow(null)
 
@@ -136,8 +152,32 @@ class ChatViewModel(
             _askAutoConsent.value = true
             return
         }
+        if (mode.reachesCloud && !signedIn()) {
+            _askSignIn.value = mode
+            return
+        }
         _mode.value = mode
         _activeChatId.value?.let { id -> viewModelScope.launch { repository.setChatMode(id, mode) } }
+    }
+
+    /**
+     * Google's account picker for [askSignIn], from [activity] (the screen's). Signed in, the
+     * mode asked for is set and a held message goes; closed, nothing changes.
+     */
+    suspend fun signIn(activity: android.content.Context) {
+        val wanted = _askSignIn.value ?: return
+        val outcome = signInWithGoogle(activity)
+        _askSignIn.value = null
+        val held = heldText
+        heldText = null
+        when (outcome) {
+            HybridSetup.SignIn.Done -> {
+                setMode(wanted)
+                held?.let(::send)
+            }
+            HybridSetup.SignIn.Cancelled -> if (held != null) _error.value = "Not sent: Cloud and Auto need you signed in with Google. Sign in, or switch this chat to Local."
+            is HybridSetup.SignIn.Failed -> _error.value = outcome.message
+        }
     }
 
     fun answerCloudConsent(agreed: Boolean) {
@@ -530,6 +570,11 @@ class ChatViewModel(
     fun cancelRecording() = recorder.cancel()
 
     fun send(text: String) {
+        if (_mode.value.reachesCloud && cloudAvailable() && !signedIn()) {
+            heldText = text
+            _askSignIn.value = _mode.value
+            return
+        }
         stopSpeaking()
         val attachment = _pendingAttachment.value
         val started = sender.send(
@@ -675,6 +720,8 @@ class ChatViewModel(
                     newChatsMode = container::newChatsMode,
                     askConfirm = container.askConfirm,
                     dailyAsks = { container.hybridSetup.autoDailyAsks },
+                    signedIn = { container.hybridSetup.signedIn },
+                    signInWithGoogle = container.hybridSetup::signInWithGoogle,
                 )
             }
         }

@@ -29,6 +29,12 @@ class GeminiSearch(
         own?.takeIf { it.enabled }?.let { return it.search(query, news) }
         val prompt = "Search the web and answer in at most 4 short sentences, with the facts and dates that matter" +
             (if (news) ", newest first" else "") + ": $query"
+        // Before the ledger: a search with no one signed in sent nothing.
+        try {
+            setup.ensureSignedIn()
+        } catch (e: HybridSetup.SignInRequired) {
+            throw WebSearchError("The web search needs the user signed in with Google. Answer from what you know, and say it may be out of date.")
+        }
         ledger.record(CloudLedger.Entry(System.currentTimeMillis(), null, CloudLedger.Kind.SEARCH.key, setup.liteModel, query))
         val response = try {
             setup.ai().generativeModel(

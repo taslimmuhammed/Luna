@@ -116,6 +116,8 @@ class FirebaseBackend(
     override suspend fun ensureReady(): Boolean {
         check(setup.configured) { NOT_SET_UP }
         check(setup.cloudAvailable) { "Cloud mode is turned off for now. Switch this chat to Local to carry on." }
+        // Not signed in is said at the request ([CloudChatSession.stream], [complete]): this also
+        // runs while a chat is only being made ready, where a throw has no one to catch it.
         return true
     }
 
@@ -158,6 +160,7 @@ class FirebaseBackend(
         sampling: Sampling,
     ): String {
         ensureReady()
+        setup.ensureSignedIn()
         val short = (system.length + input.length) <= NANO_MAX_CHARS && jsonSchema == null
         val config = generationConfig {
             maxOutputTokens = maxTokens + THINKING_TOKENS
@@ -440,6 +443,11 @@ private class CloudChatSession(
     }
 
     private fun stream(added: List<Content>, fallbackPrompt: String?): Flow<GenEvent> = flow {
+        // Signed out: nothing is sent, and the chat says how to sign in.
+        if (!backend.nanoSetup.signedIn) {
+            emit(GenEvent.Error(HybridSetup.SignInRequired()))
+            return@flow
+        }
         if (!opened) {
             opened = true
             backend.record(

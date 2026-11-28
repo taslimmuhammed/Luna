@@ -314,6 +314,10 @@ dependencies {
     implementation(libs.firebase.appcheck.debug)
     // Which cloud model, and the limits on what goes to it, changeable without a release.
     implementation(libs.firebase.config)
+    implementation(libs.firebase.auth)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services)
+    implementation(libs.googleid)
     implementation(libs.mlkit.genai.prompt)
     implementation(libs.mlkit.genai.speech)
     // Reads the words on screenshots for photo search (gallery/ScreenText). The bundled model, a

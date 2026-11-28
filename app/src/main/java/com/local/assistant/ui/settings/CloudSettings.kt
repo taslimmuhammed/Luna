@@ -16,19 +16,23 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.local.assistant.data.prefs.SettingsStore
 import com.local.assistant.hybrid.ChatMode
 import com.local.assistant.hybrid.HybridSetup
 import com.local.assistant.ui.theme.AppColors
+import kotlinx.coroutines.launch
 
 /** How the main page sums Cloud mode up. */
 internal fun cloudSummary(hybrid: HybridSetup?, settings: SettingsStore): String = when {
     hybrid == null || !hybrid.configured -> "Not set up in this build · everything stays on this phone"
     !hybrid.cloudAvailable -> "Turned off for now"
+    !hybrid.signedIn -> "Sign in with Google to use Cloud and Auto · Local needs no account"
     settings.newChatsMode == ChatMode.CLOUD && settings.cloudConsented -> "New chats start in Cloud"
     settings.newChatsMode == ChatMode.AUTO && settings.autoConsented -> "New chats start in Auto · Luna decides what Gemini sees"
     else -> "New chats start Local · switch any chat to Auto or Cloud"
@@ -98,6 +102,33 @@ internal fun CloudSettings(settings: SettingsStore, hybrid: HybridSetup?, onOpen
         "Every request Cloud chats sent and every question Auto asked, word for word · Gemini today: $asksToday of ${hybrid.autoDailyAsks}",
         onOpenLedger,
     )
+    val account by hybrid.account.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var signInNote by remember { mutableStateOf<String?>(null) }
+    var signingIn by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Text("Google account", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextPrimary)
+        Text(
+            account?.let { "Signed in as ${it.email ?: it.name ?: "your Google account"}. Cloud and Auto run under it; Local chats never use it." }
+                ?: "Cloud and Auto need you signed in with Google. Local chats never do.",
+            style = MaterialTheme.typography.bodySmall,
+            color = AppColors.TextSecondary,
+        )
+        signInNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        if (account == null) {
+            TextButton(enabled = !signingIn, onClick = {
+                signingIn = true
+                signInNote = null
+                scope.launch {
+                    signInNote = (hybrid.signInWithGoogle(context) as? HybridSetup.SignIn.Failed)?.message
+                    signingIn = false
+                }
+            }) { Text("Sign in with Google") }
+        } else {
+            TextButton(onClick = { scope.launch { hybrid.signOut(context) } }) { Text("Sign out") }
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Text("Gemini Nano on this phone", style = MaterialTheme.typography.bodyLarge, color = AppColors.TextPrimary)
         Text(

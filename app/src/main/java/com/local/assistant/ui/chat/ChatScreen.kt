@@ -208,6 +208,10 @@ fun ChatScreen(
     if (askAutoConsent) {
         AutoConsentDialog(onAgree = { viewModel.answerAutoConsent(true) }, onDismiss = { viewModel.answerAutoConsent(false) })
     }
+    // Cloud or Auto with no Google account: Google's own account picker, then the mode switches.
+    val askSignIn by viewModel.askSignIn.collectAsStateWithLifecycle()
+    val signInContext = LocalContext.current
+    LaunchedEffect(askSignIn) { if (askSignIn != null) viewModel.signIn(signInContext) }
     // An Auto question that copies something private out: held for the user's say-so.
     val pendingAsk by viewModel.pendingAsk.collectAsStateWithLifecycle()
     pendingAsk?.let { held ->

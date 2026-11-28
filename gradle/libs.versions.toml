@@ -33,6 +33,12 @@ firebaseAi = "18.2.0"
 firebaseAiOnDevice = "16.0.0-beta08"
 firebaseAppCheck = "20.1.0"
 firebaseConfig = "24.0.1"
+# Cloud and Auto run under the user's Google account (Firebase Authentication): Firebase AI Logic
+# sends its ID token with each request. 25.0.0 is on the same Firebase core (common 23) as firebase-ai.
+firebaseAuth = "25.0.0"
+# Google's account picker for that sign-in (Credential Manager, Sign in with Google).
+credentials = "1.6.0"
+googleId = "1.2.1"
 # Gemini Nano through AICore directly (ML Kit Prompt API), the version Firebase's on-device part uses.
 mlkitGenaiPrompt = "1.0.0-beta5"
 # AICore's speech recognition, for Nano chats' voice messages (Nano can't hear).
@@ -83,6 +89,10 @@ firebase-ai-ondevice = { group = "com.google.firebase", name = "firebase-ai-onde
 firebase-appcheck-debug = { group = "com.google.firebase", name = "firebase-appcheck-debug", version.ref = "firebaseAppCheck" }
 firebase-appcheck-playintegrity = { group = "com.google.firebase", name = "firebase-appcheck-playintegrity", version.ref = "firebaseAppCheck" }
 firebase-config = { group = "com.google.firebase", name = "firebase-config", version.ref = "firebaseConfig" }
+firebase-auth = { group = "com.google.firebase", name = "firebase-auth", version.ref = "firebaseAuth" }
+androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
+androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
+googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleId" }
 mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", version.ref = "mlkitGenaiPrompt" }
 mlkit-genai-speech = { group = "com.google.mlkit", name = "genai-speech-recognition", version.ref = "mlkitGenaiSpeech" }
 mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
